@@ -1,9 +1,4 @@
-"""Cheetah velocity environment configurations.
-
-Currently mirrors the Go1 velocity config but references the Cheetah robot
-cfg. Tune rewards, sensors, and event settings once a dedicated Cheetah
-MJCF is available.
-"""
+"""Cheetah velocity environment configurations."""
 
 import math
 from typing import Literal

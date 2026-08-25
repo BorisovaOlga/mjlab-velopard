@@ -97,10 +97,10 @@ CHEETAH_SPINE_ACTUATOR_CFG = BuiltinPositionActuatorCfg(
 ##
 
 INIT_STATE = EntityCfg.InitialStateCfg(
-  pos=(0.0, 0.0, 0.24),
+  pos=(0.0, 0.0, 0.20),
   joint_pos={
-    ".*hip_pitch_joint": 0.9,
-    ".*knee_pitch_joint": -1.8,
+    ".*hip_pitch_joint": 0.0,
+    ".*knee_pitch_joint": 0.0,
     "body_pitch_joint": 0.0,
   },
   joint_vel={".*": 0.0},
@@ -111,16 +111,27 @@ INIT_STATE = EntityCfg.InitialStateCfg(
 # Collision config (reuse Go1-style selectors)
 ##
 
-_foot_regex = "^[FR][LR]_foot_collision$"
+geom_names = (
+  r"^left_front_.*_collision\d*$",
+  r"^right_front_.*_collision\d*$",
+  r"^left_(?!front).*_collision\d*$",
+  r"^right_(?!front).*_collision\d*$",
+)
 
 FEET_ONLY_COLLISION = CollisionCfg(
-  geom_names_expr=(_foot_regex,),
+  geom_names_expr=geom_names,
   contype=0,
   conaffinity=1,
   condim=3,
   priority=1,
   friction=(0.6,),
   solimp=(0.9, 0.95, 0.023),
+)
+
+# Combined foot regex used by FULL_COLLISION mappings (matches front/hind left/right)
+_foot_regex = (
+  r"^(?:left_front_.*_collision\d*|right_front_.*_collision\d*|"
+  r"left_(?!front).*_collision\d*|right_(?!front).*_collision\d*)$"
 )
 
 _collision_regex = r".*_collision\d*"
