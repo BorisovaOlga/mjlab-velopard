@@ -12,6 +12,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import TerminationTermCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
@@ -41,6 +42,14 @@ def cheetah_rough_env_cfg(
   cfg.sim.contact_sensor_maxmatch = 500
 
   cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}
+
+  # A shared clock lets the policy coordinate all feet and the spine instead of
+  # inferring gait phase from contacts after they have already happened.
+  gait_period = 0.4
+  for group in cfg.observations.values():
+    group.terms["gait_phase"] = ObservationTermCfg(
+      func=mdp.gait_phase, params={"period": gait_period}
+    )
 
   # Set raycast sensor frame to the cheetah root body (body_front_link).
   for sensor in cfg.scene.sensors or ():
@@ -263,13 +272,27 @@ def cheetah_rough_env_cfg(
   # explicit; the paper's rotary gallop order would be (0, 1, 3, 2).
   cfg.rewards["gallop_sequence"] = RewardTermCfg(
     func=mdp.footfall_sequence,
-    weight=0.5,
+    weight=0.0,
     params={
       "sensor_name": feet_ground_cfg.name,
       "sequence": (0, 3, 1, 2),
       "command_name": "twist",
       "command_threshold": 0.3,
       "wrong_contact_penalty": 0.5,
+    },
+  )
+  # Sensor order is FL, FR, RL, RR.  These offsets create the requested cyclic
+  # touchdown order FL -> RR -> FR -> RL at quarter-period intervals.
+  cfg.rewards["clock_gallop"] = RewardTermCfg(
+    func=mdp.clock_gait,
+    weight=1.5,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "period": gait_period,
+      "offsets": (0.0, 0.5, 0.25, 0.75),
+      "stance_ratio": 0.20,
+      "command_threshold": 0.15,
     },
   )
   cfg.rewards["stride_length"] = RewardTermCfg(
@@ -322,6 +345,32 @@ def cheetah_rough_env_cfg(
       "range_std": 0.2,
       "center_std": 0.12,
     },
+  )
+  cfg.rewards["spine_phase_tracking"] = RewardTermCfg(
+    func=mdp.spine_phase_tracking,
+    weight=1.5,
+    params={
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
+      "period": gait_period,
+      "amplitude": 0.4,
+      "phase_offset": 0.0,
+      "std": 0.18,
+      "speed_threshold": 1.8,
+    },
+  )
+  cfg.rewards["stand_still"] = RewardTermCfg(
+    func=mdp.stand_still,
+    weight=-0.5,
+    params={
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
+      "command_threshold": 0.1,
+    },
+  )
+  cfg.rewards["joint_acc_l2"] = RewardTermCfg(
+    func=mdp.joint_acc_l2,
+    weight=-2.5e-7,
   )
   # Set foot clearance/swing targets to match the initial MJCF knee offset.
   # The knee/foot site local z-offset in the MJCF is approximately -0.092 m,

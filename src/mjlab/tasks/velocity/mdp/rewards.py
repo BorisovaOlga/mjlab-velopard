@@ -285,6 +285,49 @@ class footfall_sequence:
     self.expected_phase[env_ids] = 0
 
 
+def clock_gait(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  period: float,
+  offsets: tuple[float, ...],
+  stance_ratio: float,
+  command_threshold: float = 0.15,
+) -> torch.Tensor:
+  """Reward contacts matching a periodic per-foot stance schedule."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  assert sensor.data.current_contact_time is not None
+  global_phase = (env.episode_length_buf * env.step_dt / period).unsqueeze(1)
+  offset = torch.tensor(offsets, device=env.device, dtype=global_phase.dtype)
+  desired_contact = ((global_phase + offset) % 1.0) < stance_ratio
+  actual_contact = sensor.data.current_contact_time > 0.0
+  agreement = (desired_contact == actual_contact).float().mean(dim=1)
+  active = command[:, 0] > command_threshold
+  reward = agreement * active.float()
+  env.extras["log"]["Metrics/clock_gait_agreement"] = reward.mean()
+  return reward
+
+
+def stand_still(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  asset_cfg: SceneEntityCfg,
+  command_threshold: float = 0.1,
+) -> torch.Tensor:
+  """Penalize deviation from the default pose for near-zero commands."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  error = (
+    asset.data.joint_pos[:, asset_cfg.joint_ids]
+    - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+  )
+  active = command[:, 0] <= command_threshold
+  return torch.sum(torch.square(error), dim=1) * active.float()
+
+
 class stride_length:
   """Reward forward foot excursion from lift-off to the next touchdown."""
 
@@ -419,6 +462,29 @@ def extended_flight_posture(
   env.extras["log"]["Metrics/flight_front_foot_x"] = front_mean.mean()
   env.extras["log"]["Metrics/flight_hind_foot_x"] = hind_mean.mean()
   return reward
+
+
+def spine_phase_tracking(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  asset_cfg: SceneEntityCfg,
+  period: float,
+  amplitude: float = 0.4,
+  phase_offset: float = 0.0,
+  std: float = 0.18,
+  speed_threshold: float = 1.8,
+) -> torch.Tensor:
+  """Synchronize spine flexion and extension with the shared gait clock."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  phase = (env.episode_length_buf * env.step_dt / period + phase_offset) % 1.0
+  target = amplitude * torch.cos(2.0 * torch.pi * phase)
+  spine_pos = asset.data.joint_pos[:, asset_cfg.joint_ids].squeeze(1)
+  reward = torch.exp(-torch.square(spine_pos - target) / std**2)
+  active = command[:, 0] > speed_threshold
+  env.extras["log"]["Metrics/spine_phase_error"] = torch.abs(spine_pos - target).mean()
+  return reward * active.float()
 
 
 class spine_flexion:
