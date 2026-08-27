@@ -3,7 +3,7 @@
 from mjlab.tasks.velocity.config.go1.rl_cfg import unitree_go1_ppo_runner_cfg
 
 
-def unitree_cheetah_ppo_runner_cfg():
+def cheetah_ppo_runner_cfg():
   """Currently reuse the Go1 RL runner config.
 
   Replace or adjust experiment names and hyperparameters as needed for the

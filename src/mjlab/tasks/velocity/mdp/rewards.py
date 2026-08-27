@@ -238,6 +238,235 @@ def feet_air_time(
   return reward
 
 
+class footfall_sequence:
+  """Reward a cyclic order of foot contacts.
+
+  The contact sensor slot order is supplied explicitly by ``sequence``.  A correct
+  touchdown advances the expected foot, while an out-of-order touchdown is
+  penalized without advancing the phase.  This makes the term invariant to gait
+  frequency and avoids imposing an artificial clock on the learned gait.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.expected_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    sequence: tuple[int, ...],
+    command_name: str,
+    command_threshold: float = 0.3,
+    wrong_contact_penalty: float = 1.0,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    sequence_tensor = torch.tensor(sequence, device=env.device, dtype=torch.long)
+    expected_foot = sequence_tensor[self.expected_phase]
+    correct = first_contact.gather(1, expected_foot.unsqueeze(1)).squeeze(1)
+    any_contact = first_contact.any(dim=1)
+    wrong = any_contact & ~correct
+    active = command[:, 0] > command_threshold
+
+    reward = correct.float() - wrong_contact_penalty * wrong.float()
+    reward *= active.float()
+    self.expected_phase = torch.where(
+      correct & active,
+      (self.expected_phase + 1) % len(sequence),
+      self.expected_phase,
+    )
+    env.extras["log"]["Metrics/gallop_correct_touchdown"] = correct.float().mean()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.expected_phase[env_ids] = 0
+
+
+class stride_length:
+  """Reward forward foot excursion from lift-off to the next touchdown."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    asset: Entity = env.scene[cfg.params["asset_cfg"].name]
+    num_feet = len(cfg.params["asset_cfg"].site_ids)
+    self.takeoff_x = torch.zeros((env.num_envs, num_feet), device=env.device)
+    self.has_takeoff = torch.zeros(
+      (env.num_envs, num_feet), device=env.device, dtype=torch.bool
+    )
+    del asset
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    base_stride: float = 0.10,
+    speed_slope: float = 0.035,
+    max_stride: float = 0.24,
+    std: float = 0.04,
+    command_threshold: float = 0.15,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    foot_delta_w = asset.data.site_pos_w[
+      :, asset_cfg.site_ids
+    ] - asset.data.root_link_pos_w.unsqueeze(1)
+    root_quat = asset.data.root_link_quat_w.unsqueeze(1).expand(
+      -1, foot_delta_w.shape[1], -1
+    )
+    foot_delta_b = quat_apply_inverse(root_quat, foot_delta_w)
+    foot_x = foot_delta_b[:, :, 0]
+
+    first_air = sensor.compute_first_air(dt=env.step_dt)
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    self.takeoff_x = torch.where(first_air, foot_x, self.takeoff_x)
+    self.has_takeoff |= first_air
+
+    excursion = foot_x - self.takeoff_x
+    target = torch.clamp(
+      base_stride + speed_slope * command[:, 0], max=max_stride
+    ).unsqueeze(1)
+    landing = first_contact & self.has_takeoff
+    reward = torch.exp(-torch.square(excursion - target) / std**2) * landing.float()
+    active = command[:, 0] > command_threshold
+    reward = reward.sum(dim=1) * active.float()
+    landed = landing.float().sum()
+    mean_excursion = (excursion * landing.float()).sum() / torch.clamp(landed, min=1)
+    env.extras["log"]["Metrics/stride_length_at_landing"] = mean_excursion
+    self.has_takeoff &= ~first_contact
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.takeoff_x[env_ids] = 0.0
+    self.has_takeoff[env_ids] = False
+
+
+def flight_phase(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  speed_threshold: float = 2.0,
+  min_air_time: float = 0.025,
+) -> torch.Tensor:
+  """Reward a true flight phase, when all four feet are clear of the ground."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  current_air_time = sensor.data.current_air_time
+  assert current_air_time is not None
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  all_feet_airborne = torch.all(current_air_time > min_air_time, dim=1)
+  active = command[:, 0] > speed_threshold
+  flight = all_feet_airborne & active
+  env.extras["log"]["Metrics/flight_phase_fraction"] = flight.float().mean()
+  return flight.float()
+
+
+def extended_flight_posture(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  asset_cfg: SceneEntityCfg,
+  speed_threshold: float = 2.0,
+  min_air_time: float = 0.025,
+  front_target_x: float = 0.27,
+  hind_target_x: float = -0.24,
+  position_std: float = 0.06,
+  symmetry_std: float = 0.04,
+) -> torch.Tensor:
+  """Reward the stretched feline posture during the flight phase.
+
+  Site order must be ``(FL, FR, RL, RR)``.  Positions are expressed in the
+  root-body frame, making the reward invariant to world position and heading.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  sensor: ContactSensor = env.scene[sensor_name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  current_air_time = sensor.data.current_air_time
+  assert current_air_time is not None
+
+  foot_delta_w = asset.data.site_pos_w[
+    :, asset_cfg.site_ids
+  ] - asset.data.root_link_pos_w.unsqueeze(1)
+  root_quat = asset.data.root_link_quat_w.unsqueeze(1).expand(
+    -1, foot_delta_w.shape[1], -1
+  )
+  foot_x = quat_apply_inverse(root_quat, foot_delta_w)[:, :, 0]
+  front_x = foot_x[:, :2]
+  hind_x = foot_x[:, 2:]
+  front_mean = front_x.mean(dim=1)
+  hind_mean = hind_x.mean(dim=1)
+
+  position_error = torch.square(front_mean - front_target_x) + torch.square(
+    hind_mean - hind_target_x
+  )
+  symmetry_error = torch.square(front_x[:, 0] - front_x[:, 1]) + torch.square(
+    hind_x[:, 0] - hind_x[:, 1]
+  )
+  position_reward = torch.exp(-position_error / position_std**2)
+  symmetry_reward = torch.exp(-symmetry_error / symmetry_std**2)
+  in_flight = torch.all(current_air_time > min_air_time, dim=1)
+  active = command[:, 0] > speed_threshold
+  reward = position_reward * symmetry_reward * in_flight.float() * active.float()
+
+  env.extras["log"]["Metrics/flight_foot_span"] = (front_mean - hind_mean).mean()
+  env.extras["log"]["Metrics/flight_front_foot_x"] = front_mean.mean()
+  env.extras["log"]["Metrics/flight_hind_foot_x"] = hind_mean.mean()
+  return reward
+
+
+class spine_flexion:
+  """Reward zero-centered spine oscillation over a finite time window."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    window_s = cfg.params["window_s"]
+    self.window_steps = max(2, round(window_s / env.step_dt))
+    self.history = torch.zeros(
+      (env.num_envs, self.window_steps), device=env.device, dtype=torch.float32
+    )
+    self.index = 0
+    self.samples = 0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    window_s: float,
+    speed_threshold: float = 1.8,
+    target_range: float = 0.8,
+    range_std: float = 0.2,
+    center_std: float = 0.12,
+  ) -> torch.Tensor:
+    del window_s
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    spine_pos = asset.data.joint_pos[:, asset_cfg.joint_ids].squeeze(1)
+    self.history[:, self.index] = spine_pos
+    self.index = (self.index + 1) % self.window_steps
+    self.samples = min(self.samples + 1, self.window_steps)
+
+    spine_range = self.history.max(dim=1).values - self.history.min(dim=1).values
+    spine_center = self.history.mean(dim=1)
+    range_reward = torch.exp(-torch.square(spine_range - target_range) / range_std**2)
+    centered_reward = torch.exp(-torch.square(spine_center) / center_std**2)
+    active = (command[:, 0] > speed_threshold) & (self.samples == self.window_steps)
+    reward = range_reward * centered_reward * active.float()
+    env.extras["log"]["Metrics/spine_range"] = spine_range.mean()
+    env.extras["log"]["Metrics/spine_center"] = spine_center.mean()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.history[env_ids] = 0.0
+
+
 def feet_clearance(
   env: ManagerBasedRlEnv,
   target_height: float,

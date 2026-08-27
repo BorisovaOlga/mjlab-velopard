@@ -29,7 +29,7 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 TerrainType = Literal["rough", "obstacles"]
 
 
-def unitree_cheetah_rough_env_cfg(
+def cheetah_rough_env_cfg(
   play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
   """Create Cheetah rough terrain velocity configuration."""
@@ -49,9 +49,6 @@ def unitree_cheetah_rough_env_cfg(
       assert isinstance(sensor.frame, ObjRef)
       sensor.frame.name = "body_front_link"
 
-  # Cheetah naming: front legs use 'left_front'/'right_front', hind legs use
-  # 'left'/'right'. Use these prefixes for sensors and collision matching.
-  foot_names = ("left_front", "right_front", "left", "right")
   # The Cheetah MJCF now provides per-foot sites (FR, FL, RR, RL). Use those
   # site names for foot sensors and rewards so configs mirror Go1 style.
   site_names = ("FL", "FR", "RL", "RR")
@@ -158,6 +155,19 @@ def unitree_cheetah_rough_env_cfg(
   assert isinstance(joint_pos_action, JointPositionActionCfg)
   joint_pos_action.scale = CHEETAH_ACTION_SCALE
 
+  twist_cmd = cfg.commands["twist"]
+  assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+  # Train walking and running primarily in the sagittal plane.  Sideways and
+  # heading commands obscure the footfall order during early gait acquisition.
+  twist_cmd.rel_standing_envs = 0.1
+  twist_cmd.rel_heading_envs = 0.0
+  twist_cmd.rel_forward_envs = 1.0
+  twist_cmd.heading_command = False
+  twist_cmd.ranges.heading = None
+  twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
+  twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+  twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+
   cfg.viewer.body_name = "body_front_link"
   cfg.viewer.distance = 1.2
   cfg.viewer.elevation = -10.0
@@ -214,15 +224,15 @@ def unitree_cheetah_rough_env_cfg(
   }
   cfg.rewards["pose"].params["std_walking"] = {
     r".*_hip_roll_joint": 0.20,
-    r".*_hip_pitch_joint": 0.20,
-    r".*_knee_pitch_joint": 0.50,
-    r"body_pitch_joint": 0.20,
+    r".*_hip_pitch_joint": 0.45,
+    r".*_knee_pitch_joint": 0.70,
+    r"body_pitch_joint": 0.35,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_hip_roll_joint": 0.30,
-    r".*_hip_pitch_joint": 0.30,
-    r".*_knee_pitch_joint": 0.80,
-    r"body_pitch_joint": 0.30,
+    r".*_hip_pitch_joint": 0.70,
+    r".*_knee_pitch_joint": 1.00,
+    r"body_pitch_joint": 1.00,
   }
 
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("body_front_link",)
@@ -233,20 +243,111 @@ def unitree_cheetah_rough_env_cfg(
     # Reward modules expect either site_names or body_names; provide site_names
     # corresponding to per-foot sites added to the MJCF.
     cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
+    cfg.rewards[reward_name].params["asset_cfg"].preserve_order = True
 
+  # With the hardware actuator limits, velocity tracking must dominate the
+  # easy local optimum of standing still.  Relax smoothness and posture costs
+  # while retaining joint-limit and collision protection.
+  cfg.rewards["track_linear_velocity"].weight = 5.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.7
+  cfg.rewards["track_angular_velocity"].weight = 0.5
+  cfg.rewards["upright"].weight = 0.5
+  cfg.rewards["pose"].weight = 0.2
+  cfg.rewards["action_rate_l2"].weight = -0.01
   cfg.rewards["body_ang_vel"].weight = 0.0
   cfg.rewards["angular_momentum"].weight = 0.0
-  cfg.rewards["air_time"].weight = 0.0
+  cfg.rewards["air_time"].weight = 0.25
+  cfg.rewards["air_time"].params["threshold_max"] = 0.35
+
+  # Contact sensor order: FL=0, FR=1, RL=2, RR=3.  Keep the requested order
+  # explicit; the paper's rotary gallop order would be (0, 1, 3, 2).
+  cfg.rewards["gallop_sequence"] = RewardTermCfg(
+    func=mdp.footfall_sequence,
+    weight=0.5,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "sequence": (0, 3, 1, 2),
+      "command_name": "twist",
+      "command_threshold": 0.3,
+      "wrong_contact_penalty": 0.5,
+    },
+  )
+  cfg.rewards["stride_length"] = RewardTermCfg(
+    func=mdp.stride_length,
+    weight=3.0,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
+      "base_stride": 0.10,
+      "speed_slope": 0.035,
+      "max_stride": 0.24,
+      "std": 0.04,
+    },
+  )
+  cfg.rewards["flight_phase"] = RewardTermCfg(
+    func=mdp.flight_phase,
+    weight=0.5,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "speed_threshold": 2.0,
+      "min_air_time": 0.025,
+    },
+  )
+  cfg.rewards["extended_flight_posture"] = RewardTermCfg(
+    func=mdp.extended_flight_posture,
+    weight=2.5,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
+      "speed_threshold": 2.0,
+      "min_air_time": 0.025,
+      "front_target_x": 0.27,
+      "hind_target_x": -0.24,
+      "position_std": 0.06,
+      "symmetry_std": 0.04,
+    },
+  )
+  cfg.rewards["spine_flexion"] = RewardTermCfg(
+    func=mdp.spine_flexion,
+    weight=2.0,
+    params={
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
+      "window_s": 0.5,
+      "speed_threshold": 1.8,
+      "target_range": 0.8,
+      "range_std": 0.2,
+      "center_std": 0.12,
+    },
+  )
   # Set foot clearance/swing targets to match the initial MJCF knee offset.
   # The knee/foot site local z-offset in the MJCF is approximately -0.092 m,
   # so the nominal body-to-foot distance at spawn is ~0.092 m.
   cheetah_nominal_foot_height = 0.092
   if "foot_clearance" in cfg.rewards:
     cfg.rewards["foot_clearance"].params["target_height"] = cheetah_nominal_foot_height
-    cfg.rewards["foot_clearance"].weight = -1.5
+    cfg.rewards["foot_clearance"].weight = -0.5
   if "foot_swing_height" in cfg.rewards:
-    cfg.rewards["foot_swing_height"].params["target_height"] = cheetah_nominal_foot_height
-    cfg.rewards["foot_swing_height"].weight = -0.2
+    cfg.rewards["foot_swing_height"].params["target_height"] = (
+      cheetah_nominal_foot_height
+    )
+    cfg.rewards["foot_swing_height"].weight = -0.1
+
+  command_curriculum = cfg.curriculum["command_vel"]
+  command_curriculum.params["velocity_stages"] = [
+    {
+      "step": 0,
+      "lin_vel_x": (0.0, 1.0),
+      "lin_vel_y": (0.0, 0.0),
+      "ang_vel_z": (0.0, 0.0),
+    },
+    {"step": 1000 * 24, "lin_vel_x": (0.0, 1.8)},
+    {"step": 2000 * 24, "lin_vel_x": (0.0, 3.0)},
+    {"step": 3000 * 24, "lin_vel_x": (0.0, 4.0)},
+  ]
 
   # Per-body-group collision penalties.
   cfg.rewards["self_collisions"] = RewardTermCfg(
@@ -299,9 +400,9 @@ def unitree_cheetah_rough_env_cfg(
   return cfg
 
 
-def unitree_cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Create Cheetah flat terrain velocity configuration."""
-  cfg = unitree_cheetah_rough_env_cfg(play=play)
+  cfg = cheetah_rough_env_cfg(play=play)
 
   cfg.sim.njmax = 300
   cfg.sim.mujoco.ccd_iterations = 50
@@ -346,7 +447,7 @@ def unitree_cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   if play:
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    twist_cmd.ranges.lin_vel_x = (-1.5, 2.0)
+    twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 
   return cfg

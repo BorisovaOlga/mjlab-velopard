@@ -14,6 +14,7 @@ from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.actuator import ElectricActuator, reflected_inertia
 from mjlab.utils.spec_config import CollisionCfg
+from mjlab.utils.actuator import ElectricActuator, rpm_to_rad
 
 ##
 # MJCF and assets.
@@ -34,7 +35,7 @@ def get_spec() -> mujoco.MjSpec:
 ##
 
 # Approximate rotor inertia (smaller than Go1 to reflect light design).
-ROTOR_INERTIA = 5.0e-05
+# ROTOR_INERTIA = 0.00089 #5.0e-05
 
 # Simple gearbox assumptions.
 HIP_GEAR_RATIO = 6
@@ -42,19 +43,19 @@ KNEE_GEAR_RATIO = HIP_GEAR_RATIO * 1.5
 SPINE_GEAR_RATIO = 6
 
 HIP_ACTUATOR = ElectricActuator(
-  reflected_inertia=reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
-  velocity_limit=40.0,
-  effort_limit=12.0,
+  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
+  velocity_limit= rpm_to_rad(180),
+  effort_limit=7.0,
 )
 KNEE_ACTUATOR = ElectricActuator(
-  reflected_inertia=reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
-  velocity_limit=30.0,
+  reflected_inertia= 0.005399, #reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(435),
   effort_limit=18.0,
 )
 SPINE_ACTUATOR = ElectricActuator(
-  reflected_inertia=reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
-  velocity_limit=20.0,
-  effort_limit=6.0,
+  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
+  velocity_limit= rpm_to_rad(180),#20.0,
+  effort_limit= 12.0,
 )
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz

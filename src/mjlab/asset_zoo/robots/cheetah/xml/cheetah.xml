@@ -76,7 +76,7 @@
               <geom name="left_knee_pitch_link_collision_1" class="collision" type="capsule" size="0.01 0.05" pos="0.08 0 -0.01" euler="0 1.7 0" rgba="0 0 0.7 0.5"/>
               <geom name="left_knee_pitch_link_collision_2" class="collision" type="sphere" size="0.02" pos="0.12 0 -0.02" rgba="0 0 0.7 0.5"/>
               <joint name="left_knee_pitch_joint" type="hinge" axis="0 1 0" range="-1.1 0.57" armature="0.00089" frictionloss="0.01" damping="0.1" actuatorfrcrange="-17.0 17.0"/>
-              <site name="RL" pos="0 0 -0.092" type="sphere" size="0.023" group="5"/>
+              <site name="RL" pos="0 0 0.046" type="sphere" size="0.023" group="5"/>
             </body>
             <body name="left_knee_pitch_actuator" pos="5.452146062779414e-17 0.028000000000000087 6.3235473773489e-17" quat="0.923879532511287 0.0 -0.3826834323650894 0.0">
               <inertial pos="-9.498962391717215e-06 0.02056927011733872 0.00031409699200574993" mass="0.21064230113387258" quat="0.7763648004745358 0.630102536639915 -0.011736780053926638 0.009525644232507577" diaginertia="6.699672604688675e-05 6.832464716183116e-05 7.262836237033491e-05"/>
@@ -105,7 +105,7 @@
               <geom name="right_knee_pitch_link_collision_1" class="collision" type="capsule" size="0.01 0.05" pos="0.08 0 -0.01" euler="0 1.7 0" rgba="0 0 0.7 0.5"/>
               <geom name="right_knee_pitch_link_collision_2" class="collision" type="sphere" size="0.02" pos="0.12 0 -0.02" rgba="0 0 0.7 0.5"/>
               <joint name="right_knee_pitch_joint" type="hinge" axis="0 1 0" range="-1.1 0.57" armature="0.00089" frictionloss="0.01" damping="0.1" actuatorfrcrange="-17.0 17.0"/>
-              <site name="RR" pos="0 0 -0.092" type="sphere" size="0.023" group="5"/>
+              <site name="RR" pos="0 0 0.046" type="sphere" size="0.023" group="5"/>
             </body>
             <body name="right_knee_pitch_actuator" pos="0.0 -0.028000000000000004 0.0" quat="0.923879532511287 0.0 -0.3826834323650894 0.0">
               <inertial pos="9.498962391447208e-06 -0.020569270117338563 -0.0003140969920059579" mass="0.21064230113387256" quat="0.7763648004745357 0.630102536639915 -0.011736780053928015 0.009525644232509673" diaginertia="6.699672604688671e-05 6.832464716183103e-05 7.262836237033483e-05"/>
@@ -159,7 +159,7 @@
             <geom name="left_front_knee_pitch_link_collision_1" class="collision" type="capsule" size="0.01 0.05" pos="0.08 0 -0.01" euler="0 1.7 0" rgba="0 0 0.7 0.5"/>
             <geom name="left_front_knee_pitch_link_collision_2" class="collision" type="sphere" size="0.02" pos="0.12 0 -0.02" rgba="0 0 0.7 0.5"/>
             <joint name="left_front_knee_pitch_joint" type="hinge" axis="0 1 0" range="-1.1 0.57" armature="0.00089" frictionloss="0.01" damping="0.1" actuatorfrcrange="-17.0 17.0"/>
-            <site name="FL" pos="0 0 -0.092" type="sphere" size="0.023" group="5"/>
+            <site name="FL" pos="0 0 0.046" type="sphere" size="0.023" group="5"/>
           </body>
           <body name="left_front_knee_pitch_actuator" pos="9.416385383623259e-17 0.028000000000000032 -2.5117309970461037e-16" quat="0.923879532511287 0.0 -0.3826834323650894 0.0">
             <inertial pos="8.526512829121202e-17 0.020569270117338747 0.0003142405936119038" mass="0.21064230113387258" quat="0.6301745350124027 -0.7764535114363911 -0.0 0.0" diaginertia="6.699672604688668e-05 6.832464716183117e-05 7.26283623703349e-05"/>
@@ -188,7 +188,7 @@
             <geom name="right_front_knee_pitch_link_collision_1" class="collision" type="capsule" size="0.01 0.05" pos="0.08 0 -0.01" euler="0 1.7 0" rgba="0 0 0.7 0.5"/>
             <geom name="right_front_knee_pitch_link_collision_2" class="collision" type="sphere" size="0.02" pos="0.12 0 -0.02" rgba="0 0 0.7 0.5"/>
             <joint name="right_front_knee_pitch_joint" type="hinge" axis="0 1 0" range="-1.1 0.57" armature="0.00089" frictionloss="0.01" damping="0.1" actuatorfrcrange="-17.0 17.0"/>
-            <site name="FR" pos="0 0 -0.092" type="sphere" size="0.023" group="5"/>
+            <site name="FR" pos="0 0 0.046" type="sphere" size="0.023" group="5"/>
           </body>
           <body name="right_front_knee_pitch_actuator" pos="0.0 -0.028000000000000004 0.0" quat="0.923879532511287 0.0 -0.3826834323650894 0.0">
             <inertial pos="-4.263256414560601e-16 -0.020569270117339628 -0.00031424059361120666" mass="0.21064230113387256" quat="0.6301745350123991 -0.7764535114363942 -0.0 0.0" diaginertia="6.69967260468867e-05 6.83246471618312e-05 7.262836237033495e-05"/>
