@@ -166,16 +166,24 @@ def cheetah_rough_env_cfg(
 
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  # Train walking and running primarily in the sagittal plane.  Sideways and
-  # heading commands obscure the footfall order during early gait acquisition.
-  twist_cmd.rel_standing_envs = 0.1
+  # Train every environment with one fixed body-frame command: 5 m/s forward.
+  twist_cmd.rel_standing_envs = 0.0
   twist_cmd.rel_heading_envs = 0.0
+  twist_cmd.rel_world_envs = 0.0
   twist_cmd.rel_forward_envs = 1.0
   twist_cmd.heading_command = False
   twist_cmd.ranges.heading = None
-  twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
+  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+
+  # Previous randomized command configuration.  Uncomment this block and the
+  # command curriculum below to restore sampling of different target speeds.
+  # twist_cmd.rel_standing_envs = 0.1
+  # twist_cmd.rel_forward_envs = 1.0
+  # twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
+  # twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+  # twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
   cfg.viewer.body_name = "body_front_link"
   cfg.viewer.distance = 1.2
@@ -258,8 +266,17 @@ def cheetah_rough_env_cfg(
   # easy local optimum of standing still.  Relax smoothness and posture costs
   # while retaining joint-limit and collision protection.
   cfg.rewards["track_linear_velocity"].weight = 5.0
-  cfg.rewards["track_linear_velocity"].params["std"] = 0.7
-  cfg.rewards["track_angular_velocity"].weight = 0.5
+  cfg.rewards["track_linear_velocity"].params["std"] = 2.0
+  cfg.rewards["forward_velocity_progress"] = RewardTermCfg(
+    func=mdp.forward_velocity_progress,
+    weight=8.0,
+    params={"command_name": "twist"},
+  )
+  cfg.rewards["track_angular_velocity"].weight = 2.0
+  cfg.rewards["planar_drift_l2"] = RewardTermCfg(
+    func=mdp.planar_drift_l2,
+    weight=-1.0,
+  )
   cfg.rewards["upright"].weight = 0.5
   cfg.rewards["pose"].weight = 0.2
   cfg.rewards["action_rate_l2"].weight = -0.01
@@ -281,11 +298,11 @@ def cheetah_rough_env_cfg(
       "wrong_contact_penalty": 0.5,
     },
   )
-  # Sensor order is FL, FR, RL, RR.  These offsets create the requested cyclic
-  # touchdown order FL -> RR -> FR -> RL at quarter-period intervals.
+  # Previous evenly spaced clock gait.  Kept disabled for comparison; the
+  # feline-specific schedule below includes two distinct flight phases.
   cfg.rewards["clock_gallop"] = RewardTermCfg(
     func=mdp.clock_gait,
-    weight=1.5,
+    weight=0.0,
     params={
       "sensor_name": feet_ground_cfg.name,
       "command_name": "twist",
@@ -293,6 +310,24 @@ def cheetah_rough_env_cfg(
       "offsets": (0.0, 0.5, 0.25, 0.75),
       "stance_ratio": 0.20,
       "command_threshold": 0.15,
+    },
+  )
+  # Sensor order: FL, FR, RL, RR.  Contacts progress through the fore pair,
+  # collected flight, hind pair, hind push, and extended flight.
+  cfg.rewards["feline_gallop_contacts"] = RewardTermCfg(
+    func=mdp.feline_gallop_contacts,
+    weight=2.0,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "period": gait_period,
+      "stance_intervals": (
+        (0.16, 0.34),  # FL
+        (0.22, 0.40),  # FR
+        (0.61, 0.80),  # RL
+        (0.54, 0.73),  # RR
+      ),
+      "command_threshold": 1.0,
     },
   )
   cfg.rewards["stride_length"] = RewardTermCfg(
@@ -316,21 +351,57 @@ def cheetah_rough_env_cfg(
       "command_name": "twist",
       "speed_threshold": 2.0,
       "min_air_time": 0.025,
+      "phase_period": gait_period,
+      "phase_windows": ((0.0, 0.16), (0.40, 0.54), (0.80, 1.0)),
     },
   )
   cfg.rewards["extended_flight_posture"] = RewardTermCfg(
     func=mdp.extended_flight_posture,
-    weight=2.5,
+    weight=3.5,
     params={
       "sensor_name": feet_ground_cfg.name,
       "command_name": "twist",
       "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
       "speed_threshold": 2.0,
       "min_air_time": 0.025,
-      "front_target_x": 0.27,
-      "hind_target_x": -0.24,
-      "position_std": 0.06,
-      "symmetry_std": 0.04,
+      "front_target_x": 0.24,
+      "hind_target_x": -0.20,
+      "position_std": 0.08,
+      "symmetry_std": 0.05,
+      "phase_period": gait_period,
+      "phase_windows": ((0.0, 0.16), (0.80, 1.0)),
+      "metric_prefix": "extended_flight",
+    },
+  )
+  cfg.rewards["collected_flight_posture"] = RewardTermCfg(
+    func=mdp.extended_flight_posture,
+    weight=4.0,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
+      "speed_threshold": 2.0,
+      "min_air_time": 0.025,
+      "front_target_x": 0.10,
+      "hind_target_x": -0.04,
+      "position_std": 0.08,
+      "symmetry_std": 0.05,
+      "phase_period": gait_period,
+      "phase_windows": ((0.40, 0.54),),
+      "metric_prefix": "collected_flight",
+    },
+  )
+  cfg.rewards["hind_propulsion"] = RewardTermCfg(
+    func=mdp.hind_propulsion,
+    weight=2.0,
+    params={
+      "sensor_name": feet_ground_cfg.name,
+      "command_name": "twist",
+      "asset_cfg": SceneEntityCfg("robot"),
+      "period": gait_period,
+      "push_window": (0.54, 0.80),
+      "target_acceleration": 8.0,
+      "speed_threshold": 2.0,
     },
   )
   cfg.rewards["spine_flexion"] = RewardTermCfg(
@@ -341,6 +412,7 @@ def cheetah_rough_env_cfg(
       "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
       "window_s": 0.5,
       "speed_threshold": 1.8,
+      "actual_speed_threshold": 0.5,
       "target_range": 0.8,
       "range_std": 0.2,
       "center_std": 0.12,
@@ -353,10 +425,13 @@ def cheetah_rough_env_cfg(
       "command_name": "twist",
       "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
       "period": gait_period,
-      "amplitude": 0.4,
+      # Negative at phase 0/1 (extended flight), positive near phase 0.5
+      # (collected flight).
+      "amplitude": -0.4,
       "phase_offset": 0.0,
       "std": 0.18,
       "speed_threshold": 1.8,
+      "actual_speed_threshold": 0.5,
     },
   )
   cfg.rewards["stand_still"] = RewardTermCfg(
@@ -383,20 +458,26 @@ def cheetah_rough_env_cfg(
     cfg.rewards["foot_swing_height"].params["target_height"] = (
       cheetah_nominal_foot_height
     )
-    cfg.rewards["foot_swing_height"].weight = -0.1
+    cfg.rewards["foot_swing_height"].weight = -0.5
 
-  command_curriculum = cfg.curriculum["command_vel"]
-  command_curriculum.params["velocity_stages"] = [
-    {
-      "step": 0,
-      "lin_vel_x": (0.0, 1.0),
-      "lin_vel_y": (0.0, 0.0),
-      "ang_vel_z": (0.0, 0.0),
-    },
-    {"step": 1000 * 24, "lin_vel_x": (0.0, 1.8)},
-    {"step": 2000 * 24, "lin_vel_x": (0.0, 3.0)},
-    {"step": 3000 * 24, "lin_vel_x": (0.0, 4.0)},
-  ]
+  # Disable command randomization/curriculum so it cannot overwrite the fixed
+  # (5, 0, 0) m/s command during training.
+  cfg.curriculum.pop("command_vel", None)
+
+  # Previous randomized speed curriculum.  To restore it, uncomment this block
+  # together with the randomized command configuration above.
+  # command_curriculum = cfg.curriculum["command_vel"]
+  # command_curriculum.params["velocity_stages"] = [
+  #   {
+  #     "step": 0,
+  #     "lin_vel_x": (0.0, 1.0),
+  #     "lin_vel_y": (0.0, 0.0),
+  #     "ang_vel_z": (0.0, 0.0),
+  #   },
+  #   {"step": 1000 * 24, "lin_vel_x": (0.0, 1.8)},
+  #   {"step": 2000 * 24, "lin_vel_x": (0.0, 3.0)},
+  #   {"step": 3000 * 24, "lin_vel_x": (0.0, 4.0)},
+  # ]
 
   # Per-body-group collision penalties.
   cfg.rewards["self_collisions"] = RewardTermCfg(
@@ -489,6 +570,14 @@ def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     func=mdp.bad_orientation,
     params={"limit_angle": math.radians(70.0)},
   )
+  cfg.terminations["body_too_low"] = TerminationTermCfg(
+    func=mdp.root_height_below_minimum,
+    params={"minimum_height": 0.11},
+  )
+  cfg.rewards["termination_penalty"] = RewardTermCfg(
+    func=envs_mdp.is_terminated,
+    weight=-50.0,
+  )
 
   # Disable terrain curriculum (not present in play mode since rough clears all).
   cfg.curriculum.pop("terrain_levels", None)
@@ -496,7 +585,7 @@ def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   if play:
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-    twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
+    twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
     twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
 
   return cfg

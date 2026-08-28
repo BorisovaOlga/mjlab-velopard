@@ -44,6 +44,26 @@ def track_linear_velocity(
   return torch.exp(-lin_vel_error / std**2)
 
 
+def forward_velocity_progress(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward forward progress without saturating far below the target speed.
+
+  Unlike the exponential tracking reward, this provides a useful learning signal
+  even when a robot commanded to run fast initially moves very slowly.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  target_speed = torch.clamp(command[:, 0], min=1.0e-6)
+  forward_speed = asset.data.root_link_lin_vel_b[:, 0]
+  progress = torch.clamp(forward_speed / target_speed, min=0.0, max=1.0)
+  env.extras["log"]["Metrics/forward_speed"] = forward_speed.mean()
+  return progress
+
+
 def track_angular_velocity(
   env: ManagerBasedRlEnv,
   std: float,
@@ -62,6 +82,19 @@ def track_angular_velocity(
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
   ang_vel_error = z_error + xy_error
   return torch.exp(-ang_vel_error / std**2)
+
+
+def planar_drift_l2(
+  env: ManagerBasedRlEnv,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize lateral velocity and yaw rate for straight-line running."""
+  asset: Entity = env.scene[asset_cfg.name]
+  lateral_velocity = asset.data.root_link_lin_vel_b[:, 1]
+  yaw_rate = asset.data.root_link_ang_vel_b[:, 2]
+  env.extras["log"]["Metrics/lateral_speed_abs"] = lateral_velocity.abs().mean()
+  env.extras["log"]["Metrics/yaw_rate_abs"] = yaw_rate.abs().mean()
+  return torch.square(lateral_velocity) + torch.square(yaw_rate)
 
 
 class upright:
@@ -303,10 +336,40 @@ def clock_gait(
   offset = torch.tensor(offsets, device=env.device, dtype=global_phase.dtype)
   desired_contact = ((global_phase + offset) % 1.0) < stance_ratio
   actual_contact = sensor.data.current_contact_time > 0.0
-  agreement = (desired_contact == actual_contact).float().mean(dim=1)
+  # A correct stance is worth four times a correct swing sample.  Otherwise a
+  # policy with all feet permanently airborne exploits the longer swing windows.
+  correct_stance = desired_contact & actual_contact
+  correct_swing = (~desired_contact) & (~actual_contact)
+  agreement = (correct_stance.float() + 0.25 * correct_swing.float()).mean(dim=1)
   active = command[:, 0] > command_threshold
   reward = agreement * active.float()
   env.extras["log"]["Metrics/clock_gait_agreement"] = reward.mean()
+  return reward
+
+
+def feline_gallop_contacts(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  period: float,
+  stance_intervals: tuple[tuple[float, float], ...],
+  command_threshold: float = 1.0,
+) -> torch.Tensor:
+  """Reward fore-pair, collected-flight, hind-pair rotary gallop contacts."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None
+  assert sensor.data.current_contact_time is not None
+  phase = (env.episode_length_buf * env.step_dt / period) % 1.0
+  desired_contact = torch.stack(
+    tuple((phase >= start) & (phase < end) for start, end in stance_intervals),
+    dim=1,
+  )
+  actual_contact = sensor.data.current_contact_time > 0.0
+  agreement = (desired_contact == actual_contact).float().mean(dim=1)
+  active = command[:, 0] > command_threshold
+  reward = agreement * active.float()
+  env.extras["log"]["Metrics/feline_gallop_contact_agreement"] = reward.mean()
   return reward
 
 
@@ -396,6 +459,8 @@ def flight_phase(
   command_name: str,
   speed_threshold: float = 2.0,
   min_air_time: float = 0.025,
+  phase_period: float | None = None,
+  phase_windows: tuple[tuple[float, float], ...] = (),
 ) -> torch.Tensor:
   """Reward a true flight phase, when all four feet are clear of the ground."""
   sensor: ContactSensor = env.scene[sensor_name]
@@ -405,7 +470,13 @@ def flight_phase(
   assert command is not None
   all_feet_airborne = torch.all(current_air_time > min_air_time, dim=1)
   active = command[:, 0] > speed_threshold
-  flight = all_feet_airborne & active
+  in_target_phase = torch.ones_like(all_feet_airborne)
+  if phase_period is not None and phase_windows:
+    phase = (env.episode_length_buf * env.step_dt / phase_period) % 1.0
+    in_target_phase = torch.zeros_like(all_feet_airborne)
+    for start, end in phase_windows:
+      in_target_phase |= (phase >= start) & (phase < end)
+  flight = all_feet_airborne & active & in_target_phase
   env.extras["log"]["Metrics/flight_phase_fraction"] = flight.float().mean()
   return flight.float()
 
@@ -421,6 +492,9 @@ def extended_flight_posture(
   hind_target_x: float = -0.24,
   position_std: float = 0.06,
   symmetry_std: float = 0.04,
+  phase_period: float | None = None,
+  phase_windows: tuple[tuple[float, float], ...] = (),
+  metric_prefix: str = "extended_flight",
 ) -> torch.Tensor:
   """Reward the stretched feline posture during the flight phase.
 
@@ -452,16 +526,80 @@ def extended_flight_posture(
   symmetry_error = torch.square(front_x[:, 0] - front_x[:, 1]) + torch.square(
     hind_x[:, 0] - hind_x[:, 1]
   )
-  position_reward = torch.exp(-position_error / position_std**2)
-  symmetry_reward = torch.exp(-symmetry_error / symmetry_std**2)
+  # Cauchy kernels retain a useful gradient when the initial posture is far
+  # from the target; the previous product of narrow exponentials vanished.
+  position_reward = 1.0 / (1.0 + position_error / position_std**2)
+  symmetry_reward = 1.0 / (1.0 + symmetry_error / symmetry_std**2)
   in_flight = torch.all(current_air_time > min_air_time, dim=1)
+  in_target_phase = torch.ones_like(in_flight)
+  if phase_period is not None and phase_windows:
+    phase = (env.episode_length_buf * env.step_dt / phase_period) % 1.0
+    in_target_phase = torch.zeros_like(in_flight)
+    for start, end in phase_windows:
+      in_target_phase |= (phase >= start) & (phase < end)
   active = command[:, 0] > speed_threshold
-  reward = position_reward * symmetry_reward * in_flight.float() * active.float()
+  reward = (
+    position_reward
+    * symmetry_reward
+    * in_flight.float()
+    * in_target_phase.float()
+    * active.float()
+  )
 
-  env.extras["log"]["Metrics/flight_foot_span"] = (front_mean - hind_mean).mean()
-  env.extras["log"]["Metrics/flight_front_foot_x"] = front_mean.mean()
-  env.extras["log"]["Metrics/flight_hind_foot_x"] = hind_mean.mean()
+  env.extras["log"][f"Metrics/{metric_prefix}_foot_span"] = (
+    front_mean - hind_mean
+  ).mean()
+  env.extras["log"][f"Metrics/{metric_prefix}_front_foot_x"] = front_mean.mean()
+  env.extras["log"][f"Metrics/{metric_prefix}_hind_foot_x"] = hind_mean.mean()
   return reward
+
+
+class hind_propulsion:
+  """Reward forward acceleration generated during the hind-leg stance."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.previous_speed = torch.zeros(env.num_envs, device=env.device)
+    self.initialized = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    period: float,
+    push_window: tuple[float, float],
+    target_acceleration: float = 8.0,
+    speed_threshold: float = 2.0,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    assert sensor.data.current_contact_time is not None
+    speed = asset.data.root_link_lin_vel_b[:, 0]
+    acceleration = torch.where(
+      self.initialized,
+      (speed - self.previous_speed) / env.step_dt,
+      torch.zeros_like(speed),
+    )
+    self.previous_speed = speed.clone()
+    self.initialized[:] = True
+    phase = (env.episode_length_buf * env.step_dt / period) % 1.0
+    in_push_phase = (phase >= push_window[0]) & (phase < push_window[1])
+    hind_contact = (sensor.data.current_contact_time[:, 2:] > 0.0).any(dim=1)
+    active = command[:, 0] > speed_threshold
+    reward = torch.clamp(acceleration / target_acceleration, min=0.0, max=1.0)
+    reward *= (in_push_phase & hind_contact & active).float()
+    env.extras["log"]["Metrics/hind_push_acceleration"] = torch.clamp(
+      acceleration, min=0.0
+    ).mean()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.previous_speed[env_ids] = 0.0
+    self.initialized[env_ids] = False
 
 
 def spine_phase_tracking(
@@ -473,6 +611,7 @@ def spine_phase_tracking(
   phase_offset: float = 0.0,
   std: float = 0.18,
   speed_threshold: float = 1.8,
+  actual_speed_threshold: float = 0.5,
 ) -> torch.Tensor:
   """Synchronize spine flexion and extension with the shared gait clock."""
   asset: Entity = env.scene[asset_cfg.name]
@@ -482,7 +621,9 @@ def spine_phase_tracking(
   target = amplitude * torch.cos(2.0 * torch.pi * phase)
   spine_pos = asset.data.joint_pos[:, asset_cfg.joint_ids].squeeze(1)
   reward = torch.exp(-torch.square(spine_pos - target) / std**2)
-  active = command[:, 0] > speed_threshold
+  active = (command[:, 0] > speed_threshold) & (
+    asset.data.root_link_lin_vel_b[:, 0] > actual_speed_threshold
+  )
   env.extras["log"]["Metrics/spine_phase_error"] = torch.abs(spine_pos - target).mean()
   return reward * active.float()
 
@@ -506,6 +647,7 @@ class spine_flexion:
     asset_cfg: SceneEntityCfg,
     window_s: float,
     speed_threshold: float = 1.8,
+    actual_speed_threshold: float = 0.5,
     target_range: float = 0.8,
     range_std: float = 0.2,
     center_std: float = 0.12,
@@ -523,7 +665,11 @@ class spine_flexion:
     spine_center = self.history.mean(dim=1)
     range_reward = torch.exp(-torch.square(spine_range - target_range) / range_std**2)
     centered_reward = torch.exp(-torch.square(spine_center) / center_std**2)
-    active = (command[:, 0] > speed_threshold) & (self.samples == self.window_steps)
+    active = (
+      (command[:, 0] > speed_threshold)
+      & (asset.data.root_link_lin_vel_b[:, 0] > actual_speed_threshold)
+      & (self.samples == self.window_steps)
+    )
     reward = range_reward * centered_reward * active.float()
     env.extras["log"]["Metrics/spine_range"] = spine_range.mean()
     env.extras["log"]["Metrics/spine_center"] = spine_center.mean()
