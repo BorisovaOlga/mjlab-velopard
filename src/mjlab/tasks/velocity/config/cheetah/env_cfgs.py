@@ -4,8 +4,8 @@ import math
 from typing import Literal
 
 from mjlab.asset_zoo.robots.cheetah import (
-  CHEETAH_ACTION_SCALE,
-  get_cheetah_robot_cfg,
+  CHEETAH_FIXED_SPINE_ACTION_SCALE,
+  get_fixed_spine_cheetah_robot_cfg,
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
@@ -43,7 +43,6 @@ CHEETAH_JOINT_NAMES = (
   "right_hip_roll_joint",
   "right_hip_pitch_joint",
   "right_knee_pitch_joint",
-  "body_pitch_joint",
 )
 
 
@@ -58,7 +57,7 @@ def cheetah_rough_env_cfg(
   cfg.sim.mujoco.cone = "elliptic"
   cfg.sim.contact_sensor_maxmatch = 500
 
-  cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}
+  cfg.scene.entities = {"robot": get_fixed_spine_cheetah_robot_cfg()}
 
   cfg.metrics["mechanical_cost_of_transport"] = MetricsTermCfg(
     func=mdp.mechanical_cost_of_transport,
@@ -194,7 +193,7 @@ def cheetah_rough_env_cfg(
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
-  joint_pos_action.scale = CHEETAH_ACTION_SCALE
+  joint_pos_action.scale = CHEETAH_FIXED_SPINE_ACTION_SCALE
 
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
@@ -275,19 +274,16 @@ def cheetah_rough_env_cfg(
     r".*_hip_roll_joint": 0.05,
     r".*_hip_pitch_joint": 0.05,
     r".*_knee_pitch_joint": 0.20,
-    r"body_pitch_joint": 0.05,
   }
   cfg.rewards["pose"].params["std_walking"] = {
     r".*_hip_roll_joint": 0.20,
     r".*_hip_pitch_joint": 0.45,
     r".*_knee_pitch_joint": 0.70,
-    r"body_pitch_joint": 0.35,
   }
   cfg.rewards["pose"].params["std_running"] = {
     r".*_hip_roll_joint": 0.30,
     r".*_hip_pitch_joint": 0.70,
     r".*_knee_pitch_joint": 1.00,
-    r"body_pitch_joint": 1.00,
   }
 
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("body_front_link",)
@@ -481,6 +477,10 @@ def cheetah_rough_env_cfg(
       "actual_speed_threshold": 0.5,
     },
   )
+  # The fixed-spine comparison has no spine DoF or actuator.  Remove rewards
+  # that would otherwise try to resolve the deleted body_pitch_joint.
+  cfg.rewards.pop("spine_flexion")
+  cfg.rewards.pop("spine_phase_tracking")
   cfg.rewards["stand_still"] = RewardTermCfg(
     func=mdp.stand_still,
     weight=-0.5,

@@ -202,8 +202,11 @@ def plot_joint_quantity(
   fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=True, constrained_layout=True)
   for ax, (group_title, indices) in zip(axes, joint_groups(names), strict=True):
     add_stage_background(ax)
-    for index in indices:
-      ax.plot(x, averaged[:, index], label=short_name(names[index]), linewidth=1.7)
+    if indices:
+      for index in indices:
+        ax.plot(x, averaged[:, index], label=short_name(names[index]), linewidth=1.7)
+    else:
+      ax.axhline(0.0, color="black", linewidth=1.7, label="spine (fixed)")
     ax.set_title(group_title)
     ax.set_ylabel(ylabel)
     ax.legend(ncol=3, fontsize=8, loc="upper center")

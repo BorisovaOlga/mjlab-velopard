@@ -12,9 +12,8 @@ import mujoco
 from mjlab import MJLAB_SRC_PATH
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import ElectricActuator, reflected_inertia
-from mjlab.utils.spec_config import CollisionCfg
 from mjlab.utils.actuator import ElectricActuator, rpm_to_rad
+from mjlab.utils.spec_config import CollisionCfg
 
 ##
 # MJCF and assets.
@@ -30,6 +29,14 @@ def get_spec() -> mujoco.MjSpec:
   return mujoco.MjSpec.from_file(str(CHEETAH_XML))
 
 
+def get_fixed_spine_spec() -> mujoco.MjSpec:
+  """Load the Cheetah model with its spine joint replaced by a rigid weld."""
+  spec = get_spec()
+  spine_joint = spec.joint("body_pitch_joint")
+  spec.delete(spine_joint)
+  return spec
+
+
 ##
 # Actuator config (lightweight)
 ##
@@ -43,19 +50,19 @@ KNEE_GEAR_RATIO = HIP_GEAR_RATIO * 1.5
 SPINE_GEAR_RATIO = 6
 
 HIP_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),
   effort_limit=7.0,
 )
 KNEE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.005399, #reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
+  reflected_inertia=0.005399,  # reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
   velocity_limit=rpm_to_rad(435),
   effort_limit=18.0,
 )
 SPINE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),#20.0,
-  effort_limit= 12.0,
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),  # 20.0,
+  effort_limit=12.0,
 )
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz
@@ -161,6 +168,14 @@ CHEETAH_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+CHEETAH_FIXED_SPINE_ARTICULATION = EntityArticulationInfoCfg(
+  actuators=(
+    CHEETAH_HIP_ACTUATOR_CFG,
+    CHEETAH_KNEE_ACTUATOR_CFG,
+  ),
+  soft_joint_pos_limit_factor=0.9,
+)
+
 
 def get_cheetah_robot_cfg() -> EntityCfg:
   """Get a fresh Cheetah robot configuration instance.
@@ -176,6 +191,16 @@ def get_cheetah_robot_cfg() -> EntityCfg:
   )
 
 
+def get_fixed_spine_cheetah_robot_cfg() -> EntityCfg:
+  """Get a Cheetah whose front and rear bodies form one rigid assembly."""
+  return EntityCfg(
+    init_state=INIT_STATE,
+    collisions=(FULL_COLLISION,),
+    spec_fn=get_fixed_spine_spec,
+    articulation=CHEETAH_FIXED_SPINE_ARTICULATION,
+  )
+
+
 CHEETAH_ACTION_SCALE: dict[str, float] = {}
 for a in CHEETAH_ARTICULATION.actuators:
   assert isinstance(a, BuiltinPositionActuatorCfg)
@@ -185,6 +210,12 @@ for a in CHEETAH_ARTICULATION.actuators:
   assert e is not None
   for n in names:
     CHEETAH_ACTION_SCALE[n] = 0.25 * e / s
+
+CHEETAH_FIXED_SPINE_ACTION_SCALE = {
+  name: scale
+  for name, scale in CHEETAH_ACTION_SCALE.items()
+  if name != "body_pitch_joint"
+}
 
 
 if __name__ == "__main__":
