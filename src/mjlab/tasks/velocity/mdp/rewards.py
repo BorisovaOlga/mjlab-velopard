@@ -679,6 +679,68 @@ class spine_flexion:
     self.history[env_ids] = 0.0
 
 
+class bilateral_foot_amplitude:
+  """Penalize unequal left/right foot amplitudes over one complete gait cycle."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    period = cfg.params["period"]
+    self.window_steps = max(2, round(period / env.step_dt))
+    self.history = torch.zeros(
+      (env.num_envs, self.window_steps, 4, 2),
+      device=env.device,
+      dtype=torch.float32,
+    )
+    self.index = 0
+    self.samples = 0
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    period: float,
+    amplitude_std: float = 0.02,
+  ) -> torch.Tensor:
+    del period
+    asset: Entity = env.scene[asset_cfg.name]
+    foot_delta_w = asset.data.site_pos_w[
+      :, asset_cfg.site_ids
+    ] - asset.data.root_link_pos_w.unsqueeze(1)
+    root_quat = asset.data.root_link_quat_w.unsqueeze(1).expand(
+      -1, foot_delta_w.shape[1], -1
+    )
+    foot_pos_b = quat_apply_inverse(root_quat, foot_delta_w)
+    self.history[:, self.index] = foot_pos_b[:, :, (0, 2)]
+    self.index = (self.index + 1) % self.window_steps
+    self.samples = min(self.samples + 1, self.window_steps)
+
+    amplitude = self.history.max(dim=1).values - self.history.min(dim=1).values
+    # Site order: FL, FR, RL, RR. Compare sagittal (x) and vertical (z)
+    # amplitudes within the front and hind pairs.
+    front_error = amplitude[:, 0] - amplitude[:, 1]
+    hind_error = amplitude[:, 2] - amplitude[:, 3]
+    cost = torch.square(front_error / amplitude_std).sum(dim=1) + torch.square(
+      hind_error / amplitude_std
+    ).sum(dim=1)
+    cost *= float(self.samples == self.window_steps)
+
+    env.extras["log"]["Metrics/front_left_vertical_amplitude"] = amplitude[
+      :, 0, 1
+    ].mean()
+    env.extras["log"]["Metrics/front_right_vertical_amplitude"] = amplitude[
+      :, 1, 1
+    ].mean()
+    env.extras["log"]["Metrics/front_vertical_amplitude_difference"] = (
+      front_error[:, 1].abs().mean()
+    )
+    env.extras["log"]["Metrics/front_sagittal_amplitude_difference"] = (
+      front_error[:, 0].abs().mean()
+    )
+    return cost
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.history[env_ids] = 0.0
+
+
 def feet_clearance(
   env: ManagerBasedRlEnv,
   target_height: float,

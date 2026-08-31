@@ -12,6 +12,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import TerminationTermCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -29,6 +30,22 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 TerrainType = Literal["rough", "obstacles"]
 
+CHEETAH_JOINT_NAMES = (
+  "left_front_hip_roll_joint",
+  "left_front_hip_pitch_joint",
+  "left_front_knee_pitch_joint",
+  "right_front_hip_roll_joint",
+  "right_front_hip_pitch_joint",
+  "right_front_knee_pitch_joint",
+  "left_hip_roll_joint",
+  "left_hip_pitch_joint",
+  "left_knee_pitch_joint",
+  "right_hip_roll_joint",
+  "right_hip_pitch_joint",
+  "right_knee_pitch_joint",
+  "body_pitch_joint",
+)
+
 
 def cheetah_rough_env_cfg(
   play: bool = False,
@@ -42,6 +59,21 @@ def cheetah_rough_env_cfg(
   cfg.sim.contact_sensor_maxmatch = 500
 
   cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}
+
+  cfg.metrics["mechanical_cost_of_transport"] = MetricsTermCfg(
+    func=mdp.mechanical_cost_of_transport,
+    params={"mass": 5.424414725317205},
+  )
+  for joint_name in CHEETAH_JOINT_NAMES:
+    joint_cfg = SceneEntityCfg("robot", joint_names=(joint_name,))
+    cfg.metrics[f"actuator_torque_abs/{joint_name}"] = MetricsTermCfg(
+      func=mdp.joint_abs_torque,
+      params={"asset_cfg": joint_cfg},
+    )
+    cfg.metrics[f"actuator_velocity_abs/{joint_name}"] = MetricsTermCfg(
+      func=mdp.joint_abs_velocity,
+      params={"asset_cfg": SceneEntityCfg("robot", joint_names=(joint_name,))},
+    )
 
   # A shared clock lets the policy coordinate all feet and the spine instead of
   # inferring gait phase from contacts after they have already happened.
@@ -169,13 +201,19 @@ def cheetah_rough_env_cfg(
   # Train every environment with one fixed body-frame command: 5 m/s forward.
   twist_cmd.rel_standing_envs = 0.0
   twist_cmd.rel_heading_envs = 0.0
-  twist_cmd.rel_world_envs = 0.0
-  twist_cmd.rel_forward_envs = 1.0
+  # Keep the non-random command fixed along world +X.  At reset the robot faces
+  # +X, so this is straight ahead; after yaw drift it creates a restoring
+  # lateral body-frame command instead of accepting the new heading as forward.
+  twist_cmd.rel_world_envs = 1.0
+  twist_cmd.rel_forward_envs = 0.0
   twist_cmd.heading_command = False
   twist_cmd.ranges.heading = None
   twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+
+  reset_base = cfg.events["reset_base"]
+  reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
 
   # Previous randomized command configuration.  Uncomment this block and the
   # command curriculum below to restore sampling of different target speeds.
@@ -276,6 +314,15 @@ def cheetah_rough_env_cfg(
   cfg.rewards["planar_drift_l2"] = RewardTermCfg(
     func=mdp.planar_drift_l2,
     weight=-1.0,
+  )
+  cfg.rewards["bilateral_foot_amplitude"] = RewardTermCfg(
+    func=mdp.bilateral_foot_amplitude,
+    weight=-0.5,
+    params={
+      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
+      "period": gait_period,
+      "amplitude_std": 0.02,
+    },
   )
   cfg.rewards["upright"].weight = 0.5
   cfg.rewards["pose"].weight = 0.2
@@ -586,6 +633,7 @@ def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, UniformVelocityCommandCfg)
     twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
-    twist_cmd.ranges.ang_vel_z = (-0.7, 0.7)
+    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
   return cfg
