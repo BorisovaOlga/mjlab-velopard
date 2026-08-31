@@ -173,6 +173,17 @@ def plot_cost_and_power(data: dict, bins: int, output_dir: Path) -> None:
   plt.close(fig)
 
 
+def print_cot_summary(data: dict) -> None:
+  """Print the rollout mean CoT and the mean for each gait stage."""
+  phase = data["phase"]
+  cot = data["cot"]
+  print(f"Mean mechanical Cost of Transport: {np.mean(cot):.4f}")
+  for start, end, label, _ in STAGES:
+    mask = (phase >= start) & (phase < end)
+    stage_mean = np.mean(cot[mask]) if np.any(mask) else np.nan
+    print(f"  {label} ({start:.0%}-{end:.0%}): {stage_mean:.4f}")
+
+
 def joint_groups(names: tuple[str, ...]) -> tuple[tuple[str, list[int]], ...]:
   return (
     ("Передние лапы", [i for i, name in enumerate(names) if "front" in name]),
@@ -254,6 +265,7 @@ def main() -> None:
     raise ValueError("cycles >= 1, warmup-cycles >= 0 and bins >= 4 are required.")
   args.output_dir.mkdir(parents=True, exist_ok=True)
   data = collect_rollout(args)
+  print_cot_summary(data)
   plot_cost_and_power(data, args.bins, args.output_dir)
   plot_joint_quantity(
     data,
