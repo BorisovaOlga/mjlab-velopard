@@ -15,3 +15,12 @@ def cheetah_ppo_runner_cfg():
   except Exception:
     pass
   return cfg
+
+
+def cheetah_classic_ppo_runner_cfg():
+  """Go2-style PPO configuration with separate experiment logs."""
+  cfg = unitree_go1_ppo_runner_cfg()
+  cfg.experiment_name = "cheetah_classic_velocity"
+  cfg.save_interval = 100
+  cfg.max_iterations = 10_001
+  return cfg

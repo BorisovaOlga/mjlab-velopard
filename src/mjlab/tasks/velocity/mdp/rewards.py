@@ -271,6 +271,36 @@ def feet_air_time(
   return reward
 
 
+def feet_gait(
+  env: ManagerBasedRlEnv,
+  period: float,
+  offset: tuple[float, ...],
+  threshold: float,
+  command_threshold: float,
+  command_name: str,
+  sensor_name: str,
+) -> torch.Tensor:
+  """Reward agreement with a periodic stance schedule.
+
+  This is the clock-based gait reward used by the Unitree Go2 velocity task.
+  Each offset corresponds to one foot in contact-sensor order.
+  """
+  sensor: ContactSensor = env.scene[sensor_name]
+  is_contact = sensor.data.current_contact_time > 0
+  global_phase = ((env.episode_length_buf * env.step_dt) / period).unsqueeze(1)
+  offsets = torch.as_tensor(offset, device=env.device, dtype=global_phase.dtype).view(
+    1, -1
+  )
+  leg_phase = (global_phase + offsets) % 1.0
+  is_stance = leg_phase < threshold
+  reward = (is_stance == is_contact).float().mean(dim=1)
+
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  command_magnitude = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+  return reward * (command_magnitude > command_threshold).float()
+
+
 class footfall_sequence:
   """Reward a cyclic order of foot contacts.
 
