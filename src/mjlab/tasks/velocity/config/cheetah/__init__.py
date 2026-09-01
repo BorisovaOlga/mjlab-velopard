@@ -7,7 +7,6 @@ from .env_cfgs import (
 )
 from .rl_cfg import cheetah_ppo_runner_cfg
 
-
 register_mjlab_task(
   task_id="Mjlab-Velocity-Rough-Cheetah",
   env_cfg=cheetah_rough_env_cfg(),

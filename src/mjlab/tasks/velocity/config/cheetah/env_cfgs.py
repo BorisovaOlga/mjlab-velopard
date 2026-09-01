@@ -1,4 +1,4 @@
-"""Cheetah velocity environment configurations."""
+"""Robot, sensor, command and environment configuration for Cheetah velocity."""
 
 import math
 from typing import Literal
@@ -28,6 +28,8 @@ from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
+from .gallop_rewards_cfg import configure_collision_rewards, configure_gallop_rewards
+
 TerrainType = Literal["rough", "obstacles"]
 
 CHEETAH_JOINT_NAMES = (
@@ -46,19 +48,18 @@ CHEETAH_JOINT_NAMES = (
   "body_pitch_joint",
 )
 
-
+"""Create Cheetah rough terrain velocity configuration."""
 def cheetah_rough_env_cfg(
-  play: bool = False,
+  play: bool = False,           # Function parameter to determine if the environment is in play mode or not. play=False means the environment is for learning
 ) -> ManagerBasedRlEnvCfg:
-  """Create Cheetah rough terrain velocity configuration."""
-  cfg = make_velocity_env_cfg()
+  cfg = make_velocity_env_cfg() # Create a base configuration for the velocity environment using the make_velocity_env_cfg function.
 
   cfg.sim.mujoco.ccd_iterations = 500
   cfg.sim.mujoco.impratio = 10
   cfg.sim.mujoco.cone = "elliptic"
   cfg.sim.contact_sensor_maxmatch = 500
 
-  cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}
+  cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}       # Add the cheetah robot configuration to the scene. 
 
   cfg.metrics["mechanical_cost_of_transport"] = MetricsTermCfg(
     func=mdp.mechanical_cost_of_transport,
@@ -75,9 +76,9 @@ def cheetah_rough_env_cfg(
       params={"asset_cfg": SceneEntityCfg("robot", joint_names=(joint_name,))},
     )
 
-  # A shared clock lets the policy coordinate all feet and the spine instead of
-  # inferring gait phase from contacts after they have already happened.
-  gait_period = 0.4
+  """A shared clock lets the policy coordinate all feet and the spine instead of
+  inferring gait phase from contacts after they have already happened."""
+  gait_period = 0.6 # was 0.4
   for group in cfg.observations.values():
     group.terms["gait_phase"] = ObservationTermCfg(
       func=mdp.gait_phase, params={"period": gait_period}
@@ -93,12 +94,13 @@ def cheetah_rough_env_cfg(
   # The Cheetah MJCF now provides per-foot sites (FR, FL, RR, RL). Use those
   # site names for foot sensors and rewards so configs mirror Go1 style.
   site_names = ("FL", "FR", "RL", "RR")
-  # Match collision geoms while anchoring front vs hind to avoid overlap.
+  # One support sphere per foot, in the same FL, FR, RL, RR order as sites.
+  # Broad leg regexes also matched hip/shank geoms and made air-time unreliable.
   geom_names = (
-    r"^left_front_.*_collision",
-    r"^right_front_.*_collision",
-    r"^left_(?!front).*_collision",
-    r"^right_(?!front).*_collision",
+    "left_front_knee_pitch_link_collision_2",
+    "right_front_knee_pitch_link_collision_2",
+    "left_knee_pitch_link_collision_2",
+    "right_knee_pitch_link_collision_2",
   )
 
   # Wire foot height scan to per-foot sites.
@@ -268,279 +270,19 @@ def cheetah_rough_env_cfg(
   )
   cfg.events["base_com"].params["asset_cfg"].body_names = ("body_front_link",)
 
-  # Reward regexes: match cheetah joint naming like 'left_front_hip_pitch_joint',
-  # 'left_knee_pitch_joint', etc.
-  # Per-joint stds for posture reward tuned for the Cheetah articulation.
-  cfg.rewards["pose"].params["std_standing"] = {
-    r".*_hip_roll_joint": 0.05,
-    r".*_hip_pitch_joint": 0.05,
-    r".*_knee_pitch_joint": 0.20,
-    r"body_pitch_joint": 0.05,
-  }
-  cfg.rewards["pose"].params["std_walking"] = {
-    r".*_hip_roll_joint": 0.20,
-    r".*_hip_pitch_joint": 0.45,
-    r".*_knee_pitch_joint": 0.70,
-    r"body_pitch_joint": 0.35,
-  }
-  cfg.rewards["pose"].params["std_running"] = {
-    r".*_hip_roll_joint": 0.30,
-    r".*_hip_pitch_joint": 0.70,
-    r".*_knee_pitch_joint": 1.00,
-    r"body_pitch_joint": 1.00,
-  }
+  configure_gallop_rewards(
+    cfg,
+    site_names=site_names,
+    gait_period=gait_period,
+    feet_sensor_name=feet_ground_cfg.name,
+  )
 
-  cfg.rewards["upright"].params["asset_cfg"].body_names = ("body_front_link",)
-  cfg.rewards["upright"].params["terrain_sensor_names"] = ("terrain_scan",)
-  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("body_front_link",)
-
-  for reward_name in ["foot_clearance", "foot_slip"]:
-    # Reward modules expect either site_names or body_names; provide site_names
-    # corresponding to per-foot sites added to the MJCF.
-    cfg.rewards[reward_name].params["asset_cfg"].site_names = site_names
-    cfg.rewards[reward_name].params["asset_cfg"].preserve_order = True
-
-  # With the hardware actuator limits, velocity tracking must dominate the
-  # easy local optimum of standing still.  Relax smoothness and posture costs
-  # while retaining joint-limit and collision protection.
-  cfg.rewards["track_linear_velocity"].weight = 5.0
-  cfg.rewards["track_linear_velocity"].params["std"] = 2.0
-  cfg.rewards["forward_velocity_progress"] = RewardTermCfg(
-    func=mdp.forward_velocity_progress,
-    weight=8.0,
-    params={"command_name": "twist"},
-  )
-  cfg.rewards["track_angular_velocity"].weight = 2.0
-  cfg.rewards["planar_drift_l2"] = RewardTermCfg(
-    func=mdp.planar_drift_l2,
-    weight=-1.0,
-  )
-  cfg.rewards["bilateral_foot_amplitude"] = RewardTermCfg(
-    func=mdp.bilateral_foot_amplitude,
-    weight=-0.5,
-    params={
-      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
-      "period": gait_period,
-      "amplitude_std": 0.02,
-    },
-  )
-  cfg.rewards["upright"].weight = 0.5
-  cfg.rewards["pose"].weight = 0.2
-  cfg.rewards["action_rate_l2"].weight = -0.01
-  cfg.rewards["body_ang_vel"].weight = 0.0
-  cfg.rewards["angular_momentum"].weight = 0.0
-  cfg.rewards["air_time"].weight = 0.25
-  cfg.rewards["air_time"].params["threshold_max"] = 0.35
-
-  # Contact sensor order: FL=0, FR=1, RL=2, RR=3.  Keep the requested order
-  # explicit; the paper's rotary gallop order would be (0, 1, 3, 2).
-  cfg.rewards["gallop_sequence"] = RewardTermCfg(
-    func=mdp.footfall_sequence,
-    weight=0.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "sequence": (0, 3, 1, 2),
-      "command_name": "twist",
-      "command_threshold": 0.3,
-      "wrong_contact_penalty": 0.5,
-    },
-  )
-  # Previous evenly spaced clock gait.  Kept disabled for comparison; the
-  # feline-specific schedule below includes two distinct flight phases.
-  cfg.rewards["clock_gallop"] = RewardTermCfg(
-    func=mdp.clock_gait,
-    weight=0.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "period": gait_period,
-      "offsets": (0.0, 0.5, 0.25, 0.75),
-      "stance_ratio": 0.20,
-      "command_threshold": 0.15,
-    },
-  )
-  # Sensor order: FL, FR, RL, RR.  Contacts progress through the fore pair,
-  # collected flight, hind pair, hind push, and extended flight.
-  cfg.rewards["feline_gallop_contacts"] = RewardTermCfg(
-    func=mdp.feline_gallop_contacts,
-    weight=2.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "period": gait_period,
-      "stance_intervals": (
-        (0.16, 0.34),  # FL
-        (0.22, 0.40),  # FR
-        (0.61, 0.80),  # RL
-        (0.54, 0.73),  # RR
-      ),
-      "command_threshold": 1.0,
-    },
-  )
-  cfg.rewards["stride_length"] = RewardTermCfg(
-    func=mdp.stride_length,
-    weight=3.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
-      "base_stride": 0.10,
-      "speed_slope": 0.035,
-      "max_stride": 0.24,
-      "std": 0.04,
-    },
-  )
-  cfg.rewards["flight_phase"] = RewardTermCfg(
-    func=mdp.flight_phase,
-    weight=0.5,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "speed_threshold": 2.0,
-      "min_air_time": 0.025,
-      "phase_period": gait_period,
-      "phase_windows": ((0.0, 0.16), (0.40, 0.54), (0.80, 1.0)),
-    },
-  )
-  cfg.rewards["extended_flight_posture"] = RewardTermCfg(
-    func=mdp.extended_flight_posture,
-    weight=3.5,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
-      "speed_threshold": 2.0,
-      "min_air_time": 0.025,
-      "front_target_x": 0.24,
-      "hind_target_x": -0.20,
-      "position_std": 0.08,
-      "symmetry_std": 0.05,
-      "phase_period": gait_period,
-      "phase_windows": ((0.0, 0.16), (0.80, 1.0)),
-      "metric_prefix": "extended_flight",
-    },
-  )
-  cfg.rewards["collected_flight_posture"] = RewardTermCfg(
-    func=mdp.extended_flight_posture,
-    weight=4.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", site_names=site_names, preserve_order=True),
-      "speed_threshold": 2.0,
-      "min_air_time": 0.025,
-      "front_target_x": 0.10,
-      "hind_target_x": -0.04,
-      "position_std": 0.08,
-      "symmetry_std": 0.05,
-      "phase_period": gait_period,
-      "phase_windows": ((0.40, 0.54),),
-      "metric_prefix": "collected_flight",
-    },
-  )
-  cfg.rewards["hind_propulsion"] = RewardTermCfg(
-    func=mdp.hind_propulsion,
-    weight=2.0,
-    params={
-      "sensor_name": feet_ground_cfg.name,
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot"),
-      "period": gait_period,
-      "push_window": (0.54, 0.80),
-      "target_acceleration": 8.0,
-      "speed_threshold": 2.0,
-    },
-  )
-  cfg.rewards["spine_flexion"] = RewardTermCfg(
-    func=mdp.spine_flexion,
-    weight=2.0,
-    params={
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
-      "window_s": 0.5,
-      "speed_threshold": 1.8,
-      "actual_speed_threshold": 0.5,
-      "target_range": 0.8,
-      "range_std": 0.2,
-      "center_std": 0.12,
-    },
-  )
-  cfg.rewards["spine_phase_tracking"] = RewardTermCfg(
-    func=mdp.spine_phase_tracking,
-    weight=1.5,
-    params={
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
-      "period": gait_period,
-      # Negative at phase 0/1 (extended flight), positive near phase 0.5
-      # (collected flight).
-      "amplitude": -0.4,
-      "phase_offset": 0.0,
-      "std": 0.18,
-      "speed_threshold": 1.8,
-      "actual_speed_threshold": 0.5,
-    },
-  )
-  cfg.rewards["stand_still"] = RewardTermCfg(
-    func=mdp.stand_still,
-    weight=-0.5,
-    params={
-      "command_name": "twist",
-      "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
-      "command_threshold": 0.1,
-    },
-  )
-  cfg.rewards["joint_acc_l2"] = RewardTermCfg(
-    func=mdp.joint_acc_l2,
-    weight=-2.5e-7,
-  )
-  # Set foot clearance/swing targets to match the initial MJCF knee offset.
-  # The knee/foot site local z-offset in the MJCF is approximately -0.092 m,
-  # so the nominal body-to-foot distance at spawn is ~0.092 m.
-  cheetah_nominal_foot_height = 0.092
-  if "foot_clearance" in cfg.rewards:
-    cfg.rewards["foot_clearance"].params["target_height"] = cheetah_nominal_foot_height
-    cfg.rewards["foot_clearance"].weight = -0.5
-  if "foot_swing_height" in cfg.rewards:
-    cfg.rewards["foot_swing_height"].params["target_height"] = (
-      cheetah_nominal_foot_height
-    )
-    cfg.rewards["foot_swing_height"].weight = -0.5
-
-  # Disable command randomization/curriculum so it cannot overwrite the fixed
-  # (5, 0, 0) m/s command during training.
   cfg.curriculum.pop("command_vel", None)
-
-  # Previous randomized speed curriculum.  To restore it, uncomment this block
-  # together with the randomized command configuration above.
-  # command_curriculum = cfg.curriculum["command_vel"]
-  # command_curriculum.params["velocity_stages"] = [
-  #   {
-  #     "step": 0,
-  #     "lin_vel_x": (0.0, 1.0),
-  #     "lin_vel_y": (0.0, 0.0),
-  #     "ang_vel_z": (0.0, 0.0),
-  #   },
-  #   {"step": 1000 * 24, "lin_vel_x": (0.0, 1.8)},
-  #   {"step": 2000 * 24, "lin_vel_x": (0.0, 3.0)},
-  #   {"step": 3000 * 24, "lin_vel_x": (0.0, 4.0)},
-  # ]
-
-  # Per-body-group collision penalties.
-  cfg.rewards["self_collisions"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-0.1,
-    params={"sensor_name": self_collision_cfg.name},
-  )
-  cfg.rewards["shank_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-0.1,
-    params={"sensor_name": shank_ground_cfg.name},
-  )
-  cfg.rewards["trunk_head_collision"] = RewardTermCfg(
-    func=mdp.self_collision_cost,
-    weight=-0.1,
-    params={"sensor_name": trunk_head_ground_cfg.name},
+  configure_collision_rewards(
+    cfg,
+    self_collision_sensor=self_collision_cfg.name,
+    shank_sensor=shank_ground_cfg.name,
+    trunk_sensor=trunk_head_ground_cfg.name,
   )
 
   # On rough terrain the quadruped tilts significantly; don't terminate on
