@@ -73,7 +73,8 @@ class ContactMatch:
     mode: MuJoCo element type to match against ("geom", "body", or "subtree").
     pattern: A regex (or tuple of regexes) matched against element names within
       ``entity``. If ``entity`` is unset, the pattern is treated as a literal
-      MuJoCo name (no regex expansion).
+      MuJoCo name (no regex expansion). Tuple patterns are resolved in tuple
+      order, so sensor columns line up with order-sensitive reward configs.
     entity: Entity name to scope the pattern to. If ``None``/``""``, the
       pattern is taken as a literal MuJoCo name.
     exclude: Names to filter out of the match. Each entry is treated as a
@@ -520,11 +521,11 @@ class ContactSensor(Sensor[ContactData]):
     patterns = [match.pattern] if isinstance(match.pattern, str) else match.pattern
 
     if match.mode == "geom":
-      _, names = ent.find_geoms(patterns)
+      _, names = ent.find_geoms(patterns, preserve_order=True)
     elif match.mode == "body":
-      _, names = ent.find_bodies(patterns)
+      _, names = ent.find_bodies(patterns, preserve_order=True)
     elif match.mode == "subtree":
-      _, names = ent.find_bodies(patterns)
+      _, names = ent.find_bodies(patterns, preserve_order=True)
       if not names:
         raise ValueError(
           f"Primary subtree pattern '{match.pattern}' matched no bodies in "

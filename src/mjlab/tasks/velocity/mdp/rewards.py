@@ -44,6 +44,31 @@ def track_linear_velocity(
   return torch.exp(-lin_vel_error / std**2)
 
 
+def track_center_of_mass_linear_velocity(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward for tracking commanded linear velocity with the whole-robot COM."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+
+  body_ids = asset_cfg.body_ids
+  global_body_ids = asset.data.indexing.body_ids[body_ids]
+  body_mass = asset.data.model.body_mass[:, global_body_ids]
+  body_vel_w = asset.data.body_com_vel_w[:, body_ids, :3]
+  total_mass = torch.clamp(body_mass.sum(dim=1, keepdim=True), min=1.0e-6)
+  com_vel_w = torch.sum(body_vel_w * body_mass.unsqueeze(-1), dim=1) / total_mass
+  actual = quat_apply_inverse(asset.data.root_link_quat_w, com_vel_w)
+
+  xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+  z_error = torch.square(actual[:, 2])
+  lin_vel_error = xy_error + z_error
+  return torch.exp(-lin_vel_error / std**2)
+
+
 def forward_velocity_progress(
   env: ManagerBasedRlEnv,
   command_name: str,

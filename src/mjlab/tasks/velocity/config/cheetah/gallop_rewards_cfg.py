@@ -40,12 +40,11 @@ def configure_gallop_rewards(
 
   cfg.rewards["upright"].params["asset_cfg"].body_names = ("body_front_link",)
   cfg.rewards["upright"].params["terrain_sensor_names"] = ("terrain_scan",)
-  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = (
-    "body_front_link",
-  )
+  cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("body_front_link",)
   for name in ("foot_clearance", "foot_slip"):
     cfg.rewards[name].params["asset_cfg"] = _feet(site_names)
 
+  cfg.rewards["track_linear_velocity"].func = mdp.track_center_of_mass_linear_velocity
   cfg.rewards["track_linear_velocity"].weight = 5.0
   cfg.rewards["track_linear_velocity"].params["std"] = 2.0
   cfg.rewards["track_angular_velocity"].weight = 2.0
@@ -176,9 +175,7 @@ def configure_gallop_rewards(
         weight=2.0,
         params={
           "command_name": "twist",
-          "asset_cfg": SceneEntityCfg(
-            "robot", joint_names=("body_pitch_joint",)
-          ),
+          "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
           "window_s": 0.5,
           "speed_threshold": 1.8,
           "actual_speed_threshold": 0.5,
@@ -192,9 +189,7 @@ def configure_gallop_rewards(
         weight=1.5,
         params={
           "command_name": "twist",
-          "asset_cfg": SceneEntityCfg(
-            "robot", joint_names=("body_pitch_joint",)
-          ),
+          "asset_cfg": SceneEntityCfg("robot", joint_names=("body_pitch_joint",)),
           "period": gait_period,
           "amplitude": -0.4,
           "phase_offset": 0.0,

@@ -48,18 +48,42 @@ CHEETAH_JOINT_NAMES = (
   "body_pitch_joint",
 )
 
-"""Create Cheetah rough terrain velocity configuration."""
+
+def _cheetah_command_velocity_stages() -> list[dict[str, object]]:
+  return [
+    {
+      "step": 0,
+      "lin_vel_x": (2.2, 2.2),
+      "lin_vel_y": (0.0, 0.0),
+      "ang_vel_z": (0.0, 0.0),
+    },
+    {
+      "step": 500 * 24,
+      "lin_vel_x": (3.0, 3.0),
+      "lin_vel_y": (0.0, 0.0),
+      "ang_vel_z": (0.0, 0.0),
+    },
+    {
+      "step": 1500 * 24,
+      "lin_vel_x": (5.0, 5.0),
+      "lin_vel_y": (0.0, 0.0),
+      "ang_vel_z": (0.0, 0.0),
+    },
+  ]
+
+
 def cheetah_rough_env_cfg(
-  play: bool = False,           # Function parameter to determine if the environment is in play mode or not. play=False means the environment is for learning
+  play: bool = False,
 ) -> ManagerBasedRlEnvCfg:
-  cfg = make_velocity_env_cfg() # Create a base configuration for the velocity environment using the make_velocity_env_cfg function.
+  """Create Cheetah rough terrain velocity configuration."""
+  cfg = make_velocity_env_cfg()
 
   cfg.sim.mujoco.ccd_iterations = 500
   cfg.sim.mujoco.impratio = 10
   cfg.sim.mujoco.cone = "elliptic"
   cfg.sim.contact_sensor_maxmatch = 500
 
-  cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}       # Add the cheetah robot configuration to the scene. 
+  cfg.scene.entities = {"robot": get_cheetah_robot_cfg()}
 
   cfg.metrics["mechanical_cost_of_transport"] = MetricsTermCfg(
     func=mdp.mechanical_cost_of_transport,
@@ -76,9 +100,9 @@ def cheetah_rough_env_cfg(
       params={"asset_cfg": SceneEntityCfg("robot", joint_names=(joint_name,))},
     )
 
-  """A shared clock lets the policy coordinate all feet and the spine instead of
-  inferring gait phase from contacts after they have already happened."""
-  gait_period = 0.6 # was 0.4
+  # A shared clock lets the policy coordinate all feet and the spine instead of
+  # inferring gait phase from contacts after they have already happened.
+  gait_period = 0.6
   for group in cfg.observations.values():
     group.terms["gait_phase"] = ObservationTermCfg(
       func=mdp.gait_phase, params={"period": gait_period}
@@ -200,7 +224,7 @@ def cheetah_rough_env_cfg(
 
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  # Train every environment with one fixed body-frame command: 5 m/s forward.
+  # Train every environment with a staged straight-line speed curriculum.
   twist_cmd.rel_standing_envs = 0.0
   twist_cmd.rel_heading_envs = 0.0
   # Keep the non-random command fixed along world +X.  At reset the robot faces
@@ -210,20 +234,12 @@ def cheetah_rough_env_cfg(
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.heading_command = False
   twist_cmd.ranges.heading = None
-  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+  twist_cmd.ranges.lin_vel_x = (2.2, 2.2)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
   reset_base = cfg.events["reset_base"]
   reset_base.params["pose_range"]["yaw"] = (0.0, 0.0)
-
-  # Previous randomized command configuration.  Uncomment this block and the
-  # command curriculum below to restore sampling of different target speeds.
-  # twist_cmd.rel_standing_envs = 0.1
-  # twist_cmd.rel_forward_envs = 1.0
-  # twist_cmd.ranges.lin_vel_x = (0.0, 4.0)
-  # twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
-  # twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
   cfg.viewer.body_name = "body_front_link"
   cfg.viewer.distance = 1.2
@@ -277,7 +293,9 @@ def cheetah_rough_env_cfg(
     feet_sensor_name=feet_ground_cfg.name,
   )
 
-  cfg.curriculum.pop("command_vel", None)
+  cfg.curriculum["command_vel"].params["velocity_stages"] = (
+    _cheetah_command_velocity_stages()
+  )
   configure_collision_rewards(
     cfg,
     self_collision_sensor=self_collision_cfg.name,
@@ -308,6 +326,9 @@ def cheetah_rough_env_cfg(
       mode="reset",
       params={},
     )
+    twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
     if cfg.scene.terrain is not None:
       if cfg.scene.terrain.terrain_generator is not None:

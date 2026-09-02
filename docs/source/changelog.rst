@@ -5,6 +5,12 @@ Changelog
 Upcoming version (not yet released)
 -----------------------------------
 
+Changed
+^^^^^^^
+
+- Changed Cheetah gallop velocity tasks to track whole-robot center-of-mass
+  velocity and ramp straight-line command speed through early high-speed stages.
+
 Version 1.6.0 (August 8, 2026)
 ------------------------------
 

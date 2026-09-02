@@ -258,6 +258,33 @@ def test_multi_slot_pattern_matching(device):
   assert data.current_air_time.shape == (2, 2)
 
 
+def test_primary_tuple_pattern_preserves_order(device):
+  """Tuple primary patterns preserve user order, not model geom order."""
+  feet_sensor_cfg = ContactSensorCfg(
+    name="feet_contact",
+    primary=ContactMatch(
+      mode="geom",
+      pattern=("leg2_foot_collision", "leg1_foot_collision"),
+      entity="robot",
+    ),
+    secondary=None,
+    fields=("found",),
+    track_air_time=True,
+  )
+
+  scene, _ = create_scene_with_sensor(
+    SIMPLE_ROBOT_XML, "robot", feet_sensor_cfg, device
+  )
+
+  sensor = scene["feet_contact"]
+
+  assert sensor.primary_names == ["leg2_foot_collision", "leg1_foot_collision"]
+  assert sensor.data.found is not None
+  assert sensor.data.found.shape == (2, 2)
+  assert sensor.data.current_contact_time is not None
+  assert sensor.data.current_contact_time.shape == (2, 2)
+
+
 def test_regex_pattern_matching(device):
   """Verify regex patterns correctly match multiple geoms with similar names.
 
