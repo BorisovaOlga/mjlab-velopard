@@ -5,6 +5,14 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.velocity import mdp
 
+ROTARY_STANCE_INTERVALS = (
+  (0.14, 0.28),  # FL
+  (0.54, 0.68),  # FR
+  (0.68, 0.82),  # RL
+  (0.28, 0.42),  # RR
+)
+FLIGHT_WINDOWS = ((0.0, 0.14), (0.42, 0.54), (0.82, 1.0))
+
 
 def _feet(site_names: tuple[str, ...]) -> SceneEntityCfg:
   return SceneEntityCfg("robot", site_names=site_names, preserve_order=True)
@@ -47,7 +55,7 @@ def configure_gallop_rewards(
     cfg.rewards[name].params["asset_cfg"] = _feet(site_names)
 
   cfg.rewards["track_linear_velocity"].weight = 5.0
-  cfg.rewards["track_linear_velocity"].params["std"] = 2.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 3.5
   cfg.rewards["track_angular_velocity"].weight = 2.0
   cfg.rewards["upright"].weight = 0.5
   pose.weight = 0.2
@@ -67,22 +75,36 @@ def configure_gallop_rewards(
       "planar_drift_l2": RewardTermCfg(func=mdp.planar_drift_l2, weight=-1.0),
       "bilateral_foot_amplitude": RewardTermCfg(
         func=mdp.bilateral_foot_amplitude,
-        weight=-0.5,
+        weight=-2.0,
         params={
           "asset_cfg": _feet(site_names),
           "period": gait_period,
           "amplitude_std": 0.02,
         },
       ),
+      "bilateral_actuator_power": RewardTermCfg(
+        func=mdp.bilateral_actuator_power,
+        weight=-1.0,
+        params={
+          "left_asset_cfg": SceneEntityCfg(
+            "robot", joint_names=(r"^left_.*_joint$",)
+          ),
+          "right_asset_cfg": SceneEntityCfg(
+            "robot", joint_names=(r"^right_.*_joint$",)
+          ),
+          "period": gait_period,
+        },
+      ),
       "gallop_sequence": RewardTermCfg(
         func=mdp.footfall_sequence,
-        weight=0.0,
+        weight=3.0,
         params={
           "sensor_name": feet_sensor_name,
           "sequence": (0, 3, 1, 2),
           "command_name": "twist",
           "command_threshold": 0.3,
-          "wrong_contact_penalty": 0.5,
+          "wrong_contact_penalty": 1.0,
+          "actual_speed_threshold": 0.75,
         },
       ),
       "clock_gallop": RewardTermCfg(
@@ -99,18 +121,17 @@ def configure_gallop_rewards(
       ),
       "feline_gallop_contacts": RewardTermCfg(
         func=mdp.feline_gallop_contacts,
-        weight=2.0,
+        weight=6.0,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
           "period": gait_period,
-          "stance_intervals": (
-            (0.16, 0.34),  # FL
-            (0.22, 0.40),  # FR
-            (0.61, 0.80),  # RL
-            (0.54, 0.73),  # RR
-          ),
+          "stance_intervals": ROTARY_STANCE_INTERVALS,
           "command_threshold": 1.0,
+          "correct_swing_reward": 0.25,
+          "false_contact_penalty": 2.0,
+          "missed_contact_penalty": 1.0,
+          "actual_speed_threshold": 0.75,
         },
       ),
       "stride_length": RewardTermCfg(
@@ -128,14 +149,25 @@ def configure_gallop_rewards(
       ),
       "flight_phase": RewardTermCfg(
         func=mdp.flight_phase,
-        weight=0.5,
+        weight=4.0,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
           "speed_threshold": 2.0,
           "min_air_time": 0.025,
           "phase_period": gait_period,
-          "phase_windows": ((0.0, 0.16), (0.40, 0.54), (0.80, 1.0)),
+          "phase_windows": FLIGHT_WINDOWS,
+          "actual_speed_threshold": 0.75,
+        },
+      ),
+      "jumping_in_place": RewardTermCfg(
+        func=mdp.jumping_in_place,
+        weight=-4.0,
+        params={
+          "sensor_name": feet_sensor_name,
+          "asset_cfg": SceneEntityCfg("robot"),
+          "minimum_forward_speed": 0.75,
+          "min_air_time": 0.025,
         },
       ),
       "extended_flight_posture": _flight_posture(
@@ -145,7 +177,7 @@ def configure_gallop_rewards(
         weight=3.5,
         front_target_x=0.24,
         hind_target_x=-0.20,
-        phase_windows=((0.0, 0.16), (0.80, 1.0)),
+        phase_windows=((0.0, 0.14), (0.82, 1.0)),
         metric_prefix="extended_flight",
       ),
       "collected_flight_posture": _flight_posture(
@@ -155,7 +187,7 @@ def configure_gallop_rewards(
         weight=4.0,
         front_target_x=0.10,
         hind_target_x=-0.04,
-        phase_windows=((0.40, 0.54),),
+        phase_windows=((0.42, 0.54),),
         metric_prefix="collected_flight",
       ),
       "hind_propulsion": RewardTermCfg(
@@ -166,14 +198,14 @@ def configure_gallop_rewards(
           "command_name": "twist",
           "asset_cfg": SceneEntityCfg("robot"),
           "period": gait_period,
-          "push_window": (0.54, 0.80),
+          "push_windows": ((0.28, 0.42), (0.68, 0.82)),
           "target_acceleration": 8.0,
           "speed_threshold": 2.0,
         },
       ),
       "spine_flexion": RewardTermCfg(
         func=mdp.spine_flexion,
-        weight=2.0,
+        weight=0.25,
         params={
           "command_name": "twist",
           "asset_cfg": SceneEntityCfg(
@@ -189,13 +221,16 @@ def configure_gallop_rewards(
       ),
       "spine_phase_tracking": RewardTermCfg(
         func=mdp.spine_phase_tracking,
-        weight=1.5,
+        weight=0.5,
         params={
           "command_name": "twist",
           "asset_cfg": SceneEntityCfg(
             "robot", joint_names=("body_pitch_joint",)
           ),
           "period": gait_period,
+          "sensor_name": feet_sensor_name,
+          "stance_intervals": ROTARY_STANCE_INTERVALS,
+          "minimum_contact_agreement": 0.75,
           "amplitude": -0.4,
           "phase_offset": 0.0,
           "std": 0.18,
@@ -248,6 +283,7 @@ def _flight_posture(
       "phase_period": period,
       "phase_windows": phase_windows,
       "metric_prefix": metric_prefix,
+      "actual_speed_threshold": 0.75,
     },
   )
 

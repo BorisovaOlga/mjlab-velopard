@@ -79,12 +79,15 @@ class ContactMatch:
     exclude: Names to filter out of the match. Each entry is treated as a
       regex if it contains any regex metacharacters, otherwise as an exact
       name.
+    preserve_order: When ``pattern`` is a tuple, expose matched primaries in
+      the tuple's order instead of their order in the MuJoCo model.
   """
 
   mode: Literal["geom", "body", "subtree"]
   pattern: str | tuple[str, ...]
   entity: str | None = None
   exclude: tuple[str, ...] = ()
+  preserve_order: bool = False
 
 
 @dataclass
@@ -520,11 +523,11 @@ class ContactSensor(Sensor[ContactData]):
     patterns = [match.pattern] if isinstance(match.pattern, str) else match.pattern
 
     if match.mode == "geom":
-      _, names = ent.find_geoms(patterns)
+      _, names = ent.find_geoms(patterns, preserve_order=match.preserve_order)
     elif match.mode == "body":
-      _, names = ent.find_bodies(patterns)
+      _, names = ent.find_bodies(patterns, preserve_order=match.preserve_order)
     elif match.mode == "subtree":
-      _, names = ent.find_bodies(patterns)
+      _, names = ent.find_bodies(patterns, preserve_order=match.preserve_order)
       if not names:
         raise ValueError(
           f"Primary subtree pattern '{match.pattern}' matched no bodies in "

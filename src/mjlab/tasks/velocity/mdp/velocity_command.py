@@ -154,16 +154,20 @@ class UniformVelocityCommand(CommandTerm):
     ranges = self.cfg.ranges
 
     axes = [
-      ("lin_vel_x", ranges.lin_vel_x[1]),
-      ("lin_vel_y", ranges.lin_vel_y[1]),
-      ("ang_vel_z", ranges.ang_vel_z[1]),
+      ("lin_vel_x", ranges.lin_vel_x),
+      ("lin_vel_y", ranges.lin_vel_y),
+      ("ang_vel_z", ranges.ang_vel_z),
     ]
     sliders: list = []
 
     with server.gui.add_folder(name.capitalize()):
       enabled = server.gui.add_checkbox("Enable", initial_value=False)
 
-      for label, max_val in axes:
+      for label, value_range in axes:
+        # Viser requires ``min <= initial_value <= max``. Forward-only tasks
+        # legitimately configure lateral and yaw ranges as (0, 0), so give
+        # their manual GUI controls a small non-zero display range.
+        max_val = max(abs(value_range[0]), abs(value_range[1]), 0.1)
         max_input = server.gui.add_slider(
           f"Max {label}",
           initial_value=max_val,

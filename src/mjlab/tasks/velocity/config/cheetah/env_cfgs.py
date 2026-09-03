@@ -11,6 +11,7 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers import TerminationTermCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
@@ -31,6 +32,17 @@ from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 from .gallop_rewards_cfg import configure_collision_rewards, configure_gallop_rewards
 
 TerrainType = Literal["rough", "obstacles"]
+DEFAULT_GAIT_PERIOD = 0.6
+# Keep the phase observation identical to the checkpoint used to start fine-tuning.
+# Changing it abruptly changes the meaning of two policy inputs (sin/cos phase).
+FLIGHT_FINETUNE_PERIOD = DEFAULT_GAIT_PERIOD
+FLIGHT_FINETUNE_STANCES = (
+  (0.12, 0.25),  # FL
+  (0.58, 0.71),  # FR
+  (0.71, 0.84),  # RL
+  (0.25, 0.40),  # RR
+)
+FLIGHT_FINETUNE_WINDOWS = ((0.0, 0.12), (0.40, 0.58), (0.84, 1.0))
 
 CHEETAH_JOINT_NAMES = (
   "left_front_hip_roll_joint",
@@ -51,6 +63,7 @@ CHEETAH_JOINT_NAMES = (
 """Create Cheetah rough terrain velocity configuration."""
 def cheetah_rough_env_cfg(
   play: bool = False,           # Function parameter to determine if the environment is in play mode or not. play=False means the environment is for learning
+  gait_period: float = DEFAULT_GAIT_PERIOD,
 ) -> ManagerBasedRlEnvCfg:
   cfg = make_velocity_env_cfg() # Create a base configuration for the velocity environment using the make_velocity_env_cfg function.
 
@@ -78,7 +91,6 @@ def cheetah_rough_env_cfg(
 
   """A shared clock lets the policy coordinate all feet and the spine instead of
   inferring gait phase from contacts after they have already happened."""
-  gait_period = 0.6 # was 0.4
   for group in cfg.observations.values():
     group.terms["gait_phase"] = ObservationTermCfg(
       func=mdp.gait_phase, params={"period": gait_period}
@@ -114,7 +126,9 @@ def cheetah_rough_env_cfg(
 
   feet_ground_cfg = ContactSensorCfg(
     name="feet_ground_contact",
-    primary=ContactMatch(mode="geom", pattern=geom_names, entity="robot"),
+    primary=ContactMatch(
+      mode="geom", pattern=geom_names, entity="robot", preserve_order=True
+    ),
     secondary=ContactMatch(mode="body", pattern="terrain"),
     fields=("found", "force"),
     reduce="netforce",
@@ -200,7 +214,8 @@ def cheetah_rough_env_cfg(
 
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  # Train every environment with one fixed body-frame command: 5 m/s forward.
+  # Start every environment with the first fixed curriculum stage.  The target
+  # reaches 5 m/s later; play mode below always evaluates at exactly 5 m/s.
   twist_cmd.rel_standing_envs = 0.0
   twist_cmd.rel_heading_envs = 0.0
   # Keep the non-random command fixed along world +X.  At reset the robot faces
@@ -210,7 +225,7 @@ def cheetah_rough_env_cfg(
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.heading_command = False
   twist_cmd.ranges.heading = None
-  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+  twist_cmd.ranges.lin_vel_x = (1.0, 1.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
@@ -277,7 +292,22 @@ def cheetah_rough_env_cfg(
     feet_sensor_name=feet_ground_cfg.name,
   )
 
-  cfg.curriculum.pop("command_vel", None)
+  # A policy initialized from scratch rarely discovers useful forward motion
+  # when every environment immediately requests 5 m/s.  Keep each stage fixed
+  # and straight, but raise the shared target as locomotion becomes established.
+  # The runner collects 24 environment steps per learning iteration.
+  cfg.curriculum["command_vel"] = CurriculumTermCfg(
+    func=mdp.commands_vel,
+    params={
+      "command_name": "twist",
+      "velocity_stages": [
+        {"step": 0, "lin_vel_x": (1.0, 1.0)},
+        {"step": 500 * 24, "lin_vel_x": (2.0, 2.0)},
+        {"step": 1500 * 24, "lin_vel_x": (3.5, 3.5)},
+        {"step": 3000 * 24, "lin_vel_x": (5.0, 5.0)},
+      ],
+    },
+  )
   configure_collision_rewards(
     cfg,
     self_collision_sensor=self_collision_cfg.name,
@@ -319,9 +349,12 @@ def cheetah_rough_env_cfg(
   return cfg
 
 
-def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+def cheetah_flat_env_cfg(
+  play: bool = False,
+  gait_period: float = DEFAULT_GAIT_PERIOD,
+) -> ManagerBasedRlEnvCfg:
   """Create Cheetah flat terrain velocity configuration."""
-  cfg = cheetah_rough_env_cfg(play=play)
+  cfg = cheetah_rough_env_cfg(play=play, gait_period=gait_period)
 
   cfg.sim.njmax = 300
   cfg.sim.mujoco.ccd_iterations = 50
@@ -378,4 +411,211 @@ def cheetah_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
     twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
 
+  return cfg
+
+
+def cheetah_flat_flight_finetune_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Create staged straight-running and flight training; play evaluates at 5 m/s."""
+  cfg = cheetah_flat_env_cfg(play=play, gait_period=FLIGHT_FINETUNE_PERIOD)
+  twist_cmd = cfg.commands["twist"]
+  assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+  if play:
+    twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+    twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+  # Training keeps the base 1→2→3.5→5 m/s command curriculum. Starting a
+  # random policy directly at 5 m/s previously encouraged falling and sliding.
+
+  if not play:
+    # Let the policy adapt to the corrected direction before reintroducing
+    # external disturbances in a later robustness-training stage.
+    cfg.events.pop("push_robot", None)
+    cfg.rewards["termination_penalty"].weight = -200.0
+    # Stage 1 (0-1499 iterations): learn stable straight locomotion while the
+    # command curriculum raises speed from 1 to 2 m/s.
+    cfg.rewards["planar_drift_l2"].weight = -4.0
+    cfg.rewards["world_straight_line_l2"] = RewardTermCfg(
+      func=mdp.world_straight_line_l2,
+      weight=-0.5,
+      params={"lateral_position_scale": 2.0, "heading_scale": 3.0},
+    )
+    cfg.rewards["hip_roll_deviation_l2"] = RewardTermCfg(
+      func=mdp.joint_deviation_l2,
+      weight=0.0,
+      params={
+        "asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r".*_hip_roll_joint",)
+        )
+      },
+    )
+    cfg.rewards["hip_roll_velocity_l2"] = RewardTermCfg(
+      func=envs_mdp.joint_vel_l2,
+      weight=-0.002,
+      params={
+        "asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r".*_hip_roll_joint",)
+        )
+      },
+    )
+    cfg.rewards["bilateral_foot_amplitude"].weight = -1.0
+    cfg.rewards["bilateral_actuator_power"].weight = -0.5
+    cfg.rewards["front_pair_power_balance"] = RewardTermCfg(
+      func=mdp.bilateral_actuator_power,
+      weight=0.0,
+      params={
+        "left_asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r"^left_front_.*_joint$",)
+        ),
+        "right_asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r"^right_front_.*_joint$",)
+        ),
+        "period": FLIGHT_FINETUNE_PERIOD,
+        "metric_name": "front_pair_power_difference",
+      },
+    )
+    cfg.rewards["hind_pair_power_balance"] = RewardTermCfg(
+      func=mdp.bilateral_actuator_power,
+      weight=0.0,
+      params={
+        "left_asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r"^left_(?!front_).*_joint$",)
+        ),
+        "right_asset_cfg": SceneEntityCfg(
+          "robot", joint_names=(r"^right_(?!front_).*_joint$",)
+        ),
+        "period": FLIGHT_FINETUNE_PERIOD,
+        "metric_name": "hind_pair_power_difference",
+      },
+    )
+
+    # Flight-related terms start disabled. Curriculum enables them only after
+    # straight, symmetric running and then reduced contact overlap are learned.
+    cfg.rewards["flight_phase"].weight = 0.0
+    cfg.rewards["flight_phase"].params.update(
+      {
+        "min_air_time": 0.04,
+        "phase_windows": FLIGHT_FINETUNE_WINDOWS,
+      }
+    )
+    cfg.rewards["feline_gallop_contacts"].params["stance_intervals"] = (
+      FLIGHT_FINETUNE_STANCES
+    )
+    cfg.rewards["extended_flight_posture"].params.update(
+      {
+        "min_air_time": 0.04,
+        "phase_windows": ((0.0, 0.12), (0.84, 1.0)),
+      }
+    )
+    cfg.rewards["collected_flight_posture"].params.update(
+      {"min_air_time": 0.04, "phase_windows": ((0.40, 0.58),)}
+    )
+    cfg.rewards["hind_propulsion"].params["push_windows"] = (
+      (0.25, 0.40),
+      (0.71, 0.84),
+    )
+    cfg.rewards["spine_phase_tracking"].params["stance_intervals"] = (
+      FLIGHT_FINETUNE_STANCES
+    )
+    cfg.rewards["action_rate_l2"].weight = -0.015
+    cfg.rewards["flight_contact_violation"] = RewardTermCfg(
+      func=mdp.flight_contact_violation,
+      weight=0.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "command_name": "twist",
+        "period": FLIGHT_FINETUNE_PERIOD,
+        "phase_windows": FLIGHT_FINETUNE_WINDOWS,
+        "actual_speed_threshold": 1.0,
+      },
+    )
+    cfg.rewards["excess_foot_contacts"] = RewardTermCfg(
+      func=mdp.excess_foot_contacts,
+      weight=0.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "command_name": "twist",
+        "maximum_contacts": 1,
+        "actual_speed_threshold": 1.0,
+      },
+    )
+    cfg.rewards["sustained_flight"] = RewardTermCfg(
+      func=mdp.sustained_flight,
+      weight=0.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "command_name": "twist",
+        "target_duration": 0.06,
+        "actual_speed_threshold": 1.0,
+      },
+    )
+    cfg.rewards["early_gait_cycle"] = RewardTermCfg(
+      func=mdp.early_gait_cycle,
+      weight=0.0,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "minimum_period": 0.30,
+        "foot_index": 0,
+      },
+    )
+
+    steps_per_iteration = 24
+    stage_2 = 1500 * steps_per_iteration
+    stage_3 = 3000 * steps_per_iteration
+    stage_4 = 4000 * steps_per_iteration
+
+    def add_reward_curriculum(
+      reward_name: str, stages: list[dict[str, float | int]]
+    ) -> None:
+      cfg.curriculum[f"reward_{reward_name}"] = CurriculumTermCfg(
+        func=envs_mdp.reward_curriculum,
+        params={"reward_name": reward_name, "stages": stages},
+      )
+
+    # Stage 2 (1500+): discourage multi-foot support and implausibly short cycles.
+    add_reward_curriculum(
+      "excess_foot_contacts",
+      [
+        {"step": 0, "weight": 0.0},
+        {"step": stage_2, "weight": -1.0},
+        {"step": stage_3, "weight": -2.0},
+        {"step": stage_4, "weight": -3.0},
+      ],
+    )
+    add_reward_curriculum(
+      "early_gait_cycle",
+      [
+        {"step": 0, "weight": 0.0},
+        {"step": stage_2, "weight": -1.5},
+        {"step": stage_3, "weight": -3.0},
+        {"step": stage_4, "weight": -4.0},
+      ],
+    )
+    # Stage 3 (3000+): first ask for short genuine all-feet-off-ground intervals.
+    add_reward_curriculum(
+      "flight_phase",
+      [
+        {"step": 0, "weight": 0.0},
+        {"step": stage_3, "weight": 2.0},
+        {"step": stage_4, "weight": 4.0},
+      ],
+    )
+    add_reward_curriculum(
+      "flight_contact_violation",
+      [
+        {"step": 0, "weight": 0.0},
+        {"step": stage_3, "weight": -2.0},
+        {"step": stage_4, "weight": -5.0},
+      ],
+    )
+    # Stage 4 (4000+): only after flight appears, increase its duration objective.
+    add_reward_curriculum(
+      "sustained_flight",
+      [
+        {"step": 0, "weight": 0.0},
+        {"step": stage_3, "weight": 1.0},
+        {"step": stage_4, "weight": 3.0},
+      ],
+    )
   return cfg
