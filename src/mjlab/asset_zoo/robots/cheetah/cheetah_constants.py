@@ -12,9 +12,8 @@ import mujoco
 from mjlab import MJLAB_SRC_PATH
 from mjlab.actuator import BuiltinPositionActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import ElectricActuator, reflected_inertia
-from mjlab.utils.spec_config import CollisionCfg
 from mjlab.utils.actuator import ElectricActuator, rpm_to_rad
+from mjlab.utils.spec_config import CollisionCfg
 
 ##
 # MJCF and assets.
@@ -43,19 +42,19 @@ KNEE_GEAR_RATIO = HIP_GEAR_RATIO * 1.5
 SPINE_GEAR_RATIO = 6
 
 HIP_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),
   effort_limit=7.0,
 )
 KNEE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.005399, #reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
+  reflected_inertia=0.005399,  # reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
   velocity_limit=rpm_to_rad(435),
   effort_limit=18.0,
 )
 SPINE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),#20.0,
-  effort_limit= 12.0,
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),  # 20.0,
+  effort_limit=12.0,
 )
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz
