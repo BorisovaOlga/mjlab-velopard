@@ -178,3 +178,27 @@ def cheetah_go2_baseline_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     command.ranges.lin_vel_x = (0.5, 0.5)
 
   return cfg
+
+
+def cheetah_go2_baseline_stage2_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 0.75 m/s."""
+  cfg = cheetah_go2_baseline_env_cfg(play=play)
+  command = cfg.commands["twist"]
+  assert isinstance(command, UniformVelocityCommandCfg)
+  command.ranges.lin_vel_x = (0.75, 0.75)
+
+  if not play:
+    # Resume creates a new environment and resets its simulator step counter.
+    # Use a small speed increase so the velocity reward remains informative.
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {
+        "step": 0,
+        "lin_vel_x": (0.75, 0.75),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": None,
+      }
+    ]
+
+  return cfg
