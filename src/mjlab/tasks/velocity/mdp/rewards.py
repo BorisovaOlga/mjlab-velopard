@@ -688,6 +688,53 @@ class early_gait_cycle:
     self.last_touchdown_time[env_ids] = -1.0
 
 
+class dense_minimum_gait_period:
+  """Densely penalize time immediately following each reference touchdown.
+
+  Every FL touchdown restarts a linearly decaying penalty that reaches zero at
+  ``minimum_period``. Rapid repeated touchdowns therefore keep the penalty high
+  on every simulation step instead of producing one sparse penalty sample.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.last_touchdown_time = torch.full(
+      (env.num_envs,), -1.0, device=env.device, dtype=torch.float
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    minimum_period: float = 0.18,
+    foot_index: int = 0,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)[:, foot_index]
+    current_time = env.episode_length_buf * env.step_dt
+    had_previous = self.last_touchdown_time >= 0.0
+    measured_period = current_time - self.last_touchdown_time
+    valid_touchdown = first_contact & had_previous
+    measured_sum = (measured_period * valid_touchdown.float()).sum()
+    measured_count = valid_touchdown.float().sum()
+
+    self.last_touchdown_time = torch.where(
+      first_contact, current_time, self.last_touchdown_time
+    )
+    time_since_touchdown = current_time - self.last_touchdown_time
+    penalty = torch.clamp(
+      1.0 - time_since_touchdown / minimum_period, min=0.0, max=1.0
+    ) * (self.last_touchdown_time >= 0.0).float()
+    env.extras["log"]["Metrics/dense_gait_period_penalty"] = penalty.mean()
+    env.extras["log"]["Metrics/measured_gait_period_dense"] = (
+      measured_sum / torch.clamp(measured_count, min=1.0)
+    )
+    return penalty
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_touchdown_time[env_ids] = -1.0
+
+
 def extended_flight_posture(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -763,6 +810,165 @@ def extended_flight_posture(
   env.extras["log"][f"Metrics/{metric_prefix}_front_foot_x"] = front_mean.mean()
   env.extras["log"][f"Metrics/{metric_prefix}_hind_foot_x"] = hind_mean.mean()
   return reward
+
+
+class event_flight_posture:
+  """Reward a flight posture after a specific foot touchdown.
+
+  This uses the learned rotary contact events instead of the nominal gait
+  clock. Site order must be ``(FL, FR, RL, RR)``.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.armed = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    after_foot_index: int,
+    front_target_x: float,
+    hind_target_x: float,
+    spine_target: float,
+    spine_asset_cfg: SceneEntityCfg,
+    min_air_time: float = 0.015,
+    position_std: float = 0.07,
+    symmetry_std: float = 0.05,
+    spine_std: float = 0.20,
+    actual_speed_threshold: float = 3.0,
+    metric_prefix: str = "event_flight",
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[asset_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    assert sensor.data.current_air_time is not None
+
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    any_touchdown = first_contact.any(dim=1)
+    target_touchdown = first_contact[:, after_foot_index]
+    self.armed = torch.where(any_touchdown, target_touchdown, self.armed)
+
+    foot_delta_w = asset.data.site_pos_w[
+      :, asset_cfg.site_ids
+    ] - asset.data.root_link_pos_w.unsqueeze(1)
+    root_quat = asset.data.root_link_quat_w.unsqueeze(1).expand(
+      -1, foot_delta_w.shape[1], -1
+    )
+    foot_x = quat_apply_inverse(root_quat, foot_delta_w)[:, :, 0]
+    front_x = foot_x[:, :2]
+    hind_x = foot_x[:, 2:]
+    front_mean = front_x.mean(dim=1)
+    hind_mean = hind_x.mean(dim=1)
+    position_error = torch.square(front_mean - front_target_x) + torch.square(
+      hind_mean - hind_target_x
+    )
+    symmetry_error = torch.square(front_x[:, 0] - front_x[:, 1]) + torch.square(
+      hind_x[:, 0] - hind_x[:, 1]
+    )
+    position_reward = 1.0 / (1.0 + position_error / position_std**2)
+    symmetry_reward = 1.0 / (1.0 + symmetry_error / symmetry_std**2)
+
+    spine: Entity = env.scene[spine_asset_cfg.name]
+    spine_pos = spine.data.joint_pos[:, spine_asset_cfg.joint_ids].squeeze(1)
+    spine_reward = 1.0 / (
+      1.0 + torch.square(spine_pos - spine_target) / spine_std**2
+    )
+    in_flight = torch.all(sensor.data.current_air_time > min_air_time, dim=1)
+    active = (
+      self.armed
+      & in_flight
+      & (command[:, 0] > 0.0)
+      & (asset.data.root_link_lin_vel_b[:, 0] > actual_speed_threshold)
+    )
+    reward = (0.7 * position_reward * symmetry_reward + 0.3 * spine_reward)
+    reward *= active.float()
+
+    active_float = active.float()
+    active_count = torch.clamp(active_float.sum(), min=1.0)
+    env.extras["log"][f"Metrics/{metric_prefix}_active_fraction"] = (
+      active_float.mean()
+    )
+    env.extras["log"][f"Metrics/{metric_prefix}_front_foot_x"] = (
+      front_mean * active_float
+    ).sum() / active_count
+    env.extras["log"][f"Metrics/{metric_prefix}_hind_foot_x"] = (
+      hind_mean * active_float
+    ).sum() / active_count
+    env.extras["log"][f"Metrics/{metric_prefix}_spine_position"] = (
+      spine_pos * active_float
+    ).sum() / active_count
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.armed[env_ids] = False
+
+
+class post_touchdown_flight:
+  """Create a full-flight interval shortly after a selected touchdown."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.trigger_time = torch.full(
+      (env.num_envs,), -1.0, device=env.device, dtype=torch.float
+    )
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    after_foot_index: int,
+    window_start: float = 0.02,
+    window_end: float = 0.08,
+    min_air_time: float = 0.015,
+    contact_penalty: float = 0.5,
+    actual_speed_threshold: float = 3.0,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    assert sensor.data.current_air_time is not None
+    assert sensor.data.found is not None
+
+    first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    current_time = env.episode_length_buf * env.step_dt
+    trigger = first_contact[:, after_foot_index]
+    self.trigger_time = torch.where(trigger, current_time, self.trigger_time)
+    elapsed = current_time - self.trigger_time
+    in_window = (
+      (self.trigger_time >= 0.0)
+      & (elapsed >= window_start)
+      & (elapsed <= window_end)
+    )
+    all_airborne = torch.all(sensor.data.current_air_time > min_air_time, dim=1)
+    contact_fraction = (sensor.data.found > 0).float().mean(dim=1)
+    forward_speed = env.scene["robot"].data.root_link_lin_vel_b[:, 0]
+    active = (
+      in_window
+      & (command[:, 0] > 0.0)
+      & (forward_speed > actual_speed_threshold)
+    )
+    value = torch.where(
+      all_airborne,
+      torch.ones_like(contact_fraction),
+      -contact_penalty * contact_fraction,
+    )
+    value *= active.float()
+    env.extras["log"]["Metrics/post_rl_window_fraction"] = active.float().mean()
+    env.extras["log"]["Metrics/post_rl_full_flight_fraction"] = (
+      (active & all_airborne).float().mean()
+    )
+    env.extras["log"]["Metrics/post_rl_contact_fraction"] = (
+      contact_fraction * active.float()
+    ).sum() / torch.clamp(active.float().sum(), min=1.0)
+    return value
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.trigger_time[env_ids] = -1.0
 
 
 def jumping_in_place(

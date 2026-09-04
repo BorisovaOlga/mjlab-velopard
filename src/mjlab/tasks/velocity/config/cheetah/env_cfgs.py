@@ -619,3 +619,115 @@ def cheetah_flat_flight_finetune_env_cfg(
       ],
     )
   return cfg
+
+
+def cheetah_flat_duration_finetune_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Fine-tune model 3999 for event-synchronized feline flight postures."""
+  cfg = cheetah_flat_flight_finetune_env_cfg(play=play)
+  twist_cmd = cfg.commands["twist"]
+  assert isinstance(twist_cmd, UniformVelocityCommandCfg)
+  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+  twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
+  twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+  cfg.curriculum.pop("command_vel", None)
+
+  if play:
+    return cfg
+
+  # Remove the from-scratch curriculum. These starting values match the stage
+  # immediately before iteration 4000, from which model_3999.pt was obtained.
+  for name in tuple(cfg.curriculum):
+    if name.startswith("reward_"):
+      cfg.curriculum.pop(name)
+  cfg.rewards["excess_foot_contacts"].weight = -2.0
+  cfg.rewards["early_gait_cycle"].weight = 0.0
+  # Disable rewards tied to the incompatible 0.6 s clock. Contact order is
+  # retained by the event-based sequence reward below.
+  cfg.rewards["feline_gallop_contacts"].weight = 0.0
+  cfg.rewards["flight_phase"].weight = 0.0
+  cfg.rewards["flight_contact_violation"].weight = 0.0
+  cfg.rewards["sustained_flight"].weight = 0.0
+  cfg.rewards["extended_flight_posture"].weight = 0.0
+  cfg.rewards["collected_flight_posture"].weight = 0.0
+  cfg.rewards["spine_phase_tracking"].weight = 0.0
+  cfg.rewards["hind_propulsion"].weight = 0.0
+  cfg.rewards["gallop_sequence"].weight = 5.0
+  cfg.rewards["track_linear_velocity"].weight = 7.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 2.0
+  feet_cfg = SceneEntityCfg(
+    "robot",
+    site_names=("FL", "FR", "RL", "RR"),
+    preserve_order=True,
+  )
+  spine_cfg = SceneEntityCfg("robot", joint_names=("body_pitch_joint",))
+  cfg.rewards["event_collected_flight"] = RewardTermCfg(
+    func=mdp.event_flight_posture,
+    weight=1.0,
+    params={
+      "sensor_name": "feet_ground_contact",
+      "command_name": "twist",
+      "asset_cfg": feet_cfg,
+      "after_foot_index": 3,
+      "front_target_x": 0.10,
+      "hind_target_x": -0.04,
+      "spine_target": 0.35,
+      "spine_asset_cfg": spine_cfg,
+      "metric_prefix": "event_collected_flight",
+    },
+  )
+  cfg.rewards["event_extended_flight"] = RewardTermCfg(
+    func=mdp.event_flight_posture,
+    weight=2.5,
+    params={
+      "sensor_name": "feet_ground_contact",
+      "command_name": "twist",
+      "asset_cfg": feet_cfg,
+      "after_foot_index": 2,
+      "front_target_x": 0.24,
+      "hind_target_x": -0.20,
+      "spine_target": -0.35,
+      "spine_asset_cfg": spine_cfg,
+      "metric_prefix": "event_extended_flight",
+    },
+  )
+  cfg.rewards["post_rl_flight"] = RewardTermCfg(
+    func=mdp.post_touchdown_flight,
+    weight=2.0,
+    params={
+      "sensor_name": "feet_ground_contact",
+      "command_name": "twist",
+      "after_foot_index": 2,
+      "window_start": 0.02,
+      "window_end": 0.08,
+      "min_air_time": 0.015,
+      "contact_penalty": 0.5,
+      "actual_speed_threshold": 3.0,
+    },
+  )
+  return cfg
+
+
+def cheetah_flat_contact_phase_finetune_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Use the learned touchdown sequence as the policy's four-state gait phase."""
+  cfg = cheetah_flat_duration_finetune_env_cfg(play=play)
+  for group in cfg.observations.values():
+    group.terms["gait_phase"] = ObservationTermCfg(
+      func=mdp.contact_gait_phase,
+      params={
+        "sensor_name": "feet_ground_contact",
+        "sequence": (0, 3, 1, 2),
+      },
+    )
+
+  if not play:
+    # First let the policy adapt its two former clock inputs to the contact
+    # states. Keep posture terms moderate and postpone the aggressive RL-flight
+    # creation term that increased CoT in the previous experiment.
+    cfg.rewards["event_collected_flight"].weight = 1.0
+    cfg.rewards["event_extended_flight"].weight = 1.0
+    cfg.rewards["post_rl_flight"].weight = 0.0
+  return cfg
