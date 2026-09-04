@@ -180,14 +180,15 @@ def cheetah_go2_baseline_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   return cfg
 
 
-def cheetah_go2_baseline_stage2_env_cfg(
-  play: bool = False,
+def _cheetah_go2_baseline_continuation_env_cfg(
+  speed: float,
+  play: bool,
 ) -> ManagerBasedRlEnvCfg:
-  """Continue the learned baseline at a fixed forward speed of 0.75 m/s."""
+  """Create a fixed-speed continuation without resetting to stage-one speed."""
   cfg = cheetah_go2_baseline_env_cfg(play=play)
   command = cfg.commands["twist"]
   assert isinstance(command, UniformVelocityCommandCfg)
-  command.ranges.lin_vel_x = (0.75, 0.75)
+  command.ranges.lin_vel_x = (speed, speed)
 
   if not play:
     # Resume creates a new environment and resets its simulator step counter.
@@ -195,10 +196,24 @@ def cheetah_go2_baseline_stage2_env_cfg(
     cfg.curriculum["command_vel"].params["velocity_stages"] = [
       {
         "step": 0,
-        "lin_vel_x": (0.75, 0.75),
+        "lin_vel_x": (speed, speed),
         "lin_vel_y": (0.0, 0.0),
         "ang_vel_z": None,
       }
     ]
 
   return cfg
+
+
+def cheetah_go2_baseline_stage2_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 0.75 m/s."""
+  return _cheetah_go2_baseline_continuation_env_cfg(speed=0.75, play=play)
+
+
+def cheetah_go2_baseline_stage3_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 1.0 m/s."""
+  return _cheetah_go2_baseline_continuation_env_cfg(speed=1.0, play=play)
