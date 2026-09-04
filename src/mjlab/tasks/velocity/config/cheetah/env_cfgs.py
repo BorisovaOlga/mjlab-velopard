@@ -217,3 +217,10 @@ def cheetah_go2_baseline_stage3_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
   """Continue the learned baseline at a fixed forward speed of 1.0 m/s."""
   return _cheetah_go2_baseline_continuation_env_cfg(speed=1.0, play=play)
+
+
+def cheetah_go2_baseline_stage4_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 1.25 m/s."""
+  return _cheetah_go2_baseline_continuation_env_cfg(speed=1.25, play=play)
