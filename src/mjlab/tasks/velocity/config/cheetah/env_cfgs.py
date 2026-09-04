@@ -231,3 +231,137 @@ def cheetah_go2_baseline_stage5_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
   """Continue the learned baseline at a fixed forward speed of 1.375 m/s."""
   return _cheetah_go2_baseline_continuation_env_cfg(speed=1.375, play=play)
+
+
+def cheetah_go2_baseline_stage6_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 1.5 m/s."""
+  return _cheetah_go2_baseline_continuation_env_cfg(speed=1.5, play=play)
+
+
+def cheetah_go2_baseline_stage7_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 1.625 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=1.625, play=play)
+  # With the base std=0.5, standing at this command yields an almost-zero
+  # velocity reward and PPO can collapse to a stable standing policy. Preserve
+  # a useful gradient and make forward tracking dominate pose/upright rewards.
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage8_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 1.75 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=1.75, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage9_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 2.0 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=2.0, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage10_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 2.25 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=2.25, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage11_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 2.5 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=2.5, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage12_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 3.0 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=3.0, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage13_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 3.5 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=3.5, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage14_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Continue the learned baseline at a fixed forward speed of 3.75 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=3.75, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  return cfg
+
+
+def cheetah_go2_baseline_stage15_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Fine-tune over 3.5-4.0 m/s and evaluate at exactly 4.0 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=4.0, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  if not play:
+    command = cfg.commands["twist"]
+    assert isinstance(command, UniformVelocityCommandCfg)
+    command.ranges.lin_vel_x = (3.5, 4.0)
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {
+        "step": 0,
+        "lin_vel_x": (3.5, 4.0),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": None,
+      }
+    ]
+  return cfg
+
+
+def cheetah_go2_baseline_stage16_env_cfg(
+  play: bool = False,
+) -> ManagerBasedRlEnvCfg:
+  """Fine-tune over 3.75-4.25 m/s and evaluate at exactly 4.25 m/s."""
+  cfg = _cheetah_go2_baseline_continuation_env_cfg(speed=4.25, play=play)
+  cfg.rewards["track_linear_velocity"].weight = 4.0
+  cfg.rewards["track_linear_velocity"].params["std"] = 0.8
+  if not play:
+    command = cfg.commands["twist"]
+    assert isinstance(command, UniformVelocityCommandCfg)
+    command.ranges.lin_vel_x = (3.75, 4.25)
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {
+        "step": 0,
+        "lin_vel_x": (3.75, 4.25),
+        "lin_vel_y": (0.0, 0.0),
+        "ang_vel_z": None,
+      }
+    ]
+  return cfg
