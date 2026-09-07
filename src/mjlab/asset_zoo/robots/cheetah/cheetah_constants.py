@@ -50,12 +50,12 @@ HIP_ACTUATOR = ElectricActuator(
 KNEE_ACTUATOR = ElectricActuator(
   reflected_inertia= 0.005399, #reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
   velocity_limit=rpm_to_rad(435),
-  effort_limit=18.0,
+  effort_limit=7.0,
 )
 SPINE_ACTUATOR = ElectricActuator(
   reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
   velocity_limit= rpm_to_rad(180),#20.0,
-  effort_limit= 12.0,
+  effort_limit= 7.0,
 )
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz

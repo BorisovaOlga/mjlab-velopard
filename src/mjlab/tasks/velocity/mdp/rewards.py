@@ -24,6 +24,18 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
+def _center_of_mass_velocity_b(
+  asset: Entity, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  body_ids = asset_cfg.body_ids
+  global_body_ids = asset.data.indexing.body_ids[body_ids]
+  body_mass = asset.data.model.body_mass[:, global_body_ids]
+  body_vel_w = asset.data.body_com_vel_w[:, body_ids, :3]
+  total_mass = torch.clamp(body_mass.sum(dim=1, keepdim=True), min=1.0e-6)
+  com_vel_w = torch.sum(body_vel_w * body_mass.unsqueeze(-1), dim=1) / total_mass
+  return quat_apply_inverse(asset.data.root_link_quat_w, com_vel_w)
+
+
 def track_linear_velocity(
   env: ManagerBasedRlEnv,
   std: float,
@@ -55,18 +67,17 @@ def track_center_of_mass_linear_velocity(
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
 
-  body_ids = asset_cfg.body_ids
-  global_body_ids = asset.data.indexing.body_ids[body_ids]
-  body_mass = asset.data.model.body_mass[:, global_body_ids]
-  body_vel_w = asset.data.body_com_vel_w[:, body_ids, :3]
-  total_mass = torch.clamp(body_mass.sum(dim=1, keepdim=True), min=1.0e-6)
-  com_vel_w = torch.sum(body_vel_w * body_mass.unsqueeze(-1), dim=1) / total_mass
-  actual = quat_apply_inverse(asset.data.root_link_quat_w, com_vel_w)
+  actual = _center_of_mass_velocity_b(asset, asset_cfg)
 
   xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
   z_error = torch.square(actual[:, 2])
   lin_vel_error = xy_error + z_error
   return torch.exp(-lin_vel_error / std**2)
+
+
+def action_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
+  """Penalize large absolute actions."""
+  return torch.sum(torch.square(env.action_manager.action), dim=1)
 
 
 def forward_velocity_progress(
@@ -107,6 +118,20 @@ def track_angular_velocity(
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
   ang_vel_error = z_error + xy_error
   return torch.exp(-ang_vel_error / std**2)
+
+
+def track_yaw_velocity(
+  env: ManagerBasedRlEnv,
+  std: float,
+  command_name: str,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Reward commanded yaw rate without suppressing body pitch/roll motion."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  yaw_error = torch.square(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+  return torch.exp(-yaw_error / std**2)
 
 
 def planar_drift_l2(
@@ -379,6 +404,8 @@ def feline_gallop_contacts(
   period: float,
   stance_intervals: tuple[tuple[float, float], ...],
   command_threshold: float = 1.0,
+  stance_weight: float = 3.0,
+  swing_weight: float = 0.25,
 ) -> torch.Tensor:
   """Reward fore-pair, collected-flight, hind-pair rotary gallop contacts."""
   sensor: ContactSensor = env.scene[sensor_name]
@@ -391,10 +418,31 @@ def feline_gallop_contacts(
     dim=1,
   )
   actual_contact = sensor.data.current_contact_time > 0.0
-  agreement = (desired_contact == actual_contact).float().mean(dim=1)
+  correct_stance = desired_contact & actual_contact
+  correct_swing = ~desired_contact & ~actual_contact
+  score = (
+    stance_weight * correct_stance.float() + swing_weight * correct_swing.float()
+  ).sum(dim=1)
+  normalizer = (
+    stance_weight * desired_contact.float() + swing_weight * (~desired_contact).float()
+  ).sum(dim=1)
+  agreement = score / torch.clamp(normalizer, min=1.0e-6)
   active = command[:, 0] > command_threshold
   reward = agreement * active.float()
+
+  desired_stance_count = desired_contact.float().sum()
+  swing_count = (~desired_contact).float().sum()
+  false_contact = ~desired_contact & actual_contact
   env.extras["log"]["Metrics/feline_gallop_contact_agreement"] = reward.mean()
+  env.extras["log"]["Metrics/feline_gallop_stance_recall"] = (
+    correct_stance.float().sum() / torch.clamp(desired_stance_count, min=1.0)
+  )
+  env.extras["log"]["Metrics/feline_gallop_false_contact_rate"] = (
+    false_contact.float().sum() / torch.clamp(swing_count, min=1.0)
+  )
+  env.extras["log"]["Metrics/feline_gallop_contact_count"] = (
+    actual_contact.float().sum(dim=1).mean()
+  )
   return reward
 
 
@@ -519,6 +567,7 @@ def extended_flight_posture(
   symmetry_std: float = 0.04,
   phase_period: float | None = None,
   phase_windows: tuple[tuple[float, float], ...] = (),
+  require_flight: bool = True,
   metric_prefix: str = "extended_flight",
 ) -> torch.Tensor:
   """Reward the stretched feline posture during the flight phase.
@@ -563,19 +612,28 @@ def extended_flight_posture(
     for start, end in phase_windows:
       in_target_phase |= (phase >= start) & (phase < end)
   active = command[:, 0] > speed_threshold
+  flight_gate = in_flight if require_flight else torch.ones_like(in_flight)
   reward = (
     position_reward
     * symmetry_reward
-    * in_flight.float()
+    * flight_gate.float()
     * in_target_phase.float()
     * active.float()
   )
 
+  metric_gate = (flight_gate & in_target_phase & active).float()
+  metric_count = torch.clamp(metric_gate.sum(), min=1.0)
   env.extras["log"][f"Metrics/{metric_prefix}_foot_span"] = (
     front_mean - hind_mean
   ).mean()
   env.extras["log"][f"Metrics/{metric_prefix}_front_foot_x"] = front_mean.mean()
   env.extras["log"][f"Metrics/{metric_prefix}_hind_foot_x"] = hind_mean.mean()
+  env.extras["log"][f"Metrics/{metric_prefix}_phase_foot_span"] = (
+    (front_mean - hind_mean) * metric_gate
+  ).sum() / metric_count
+  env.extras["log"][f"Metrics/{metric_prefix}_phase_posture_reward"] = (
+    position_reward * symmetry_reward * metric_gate
+  ).sum() / metric_count
   return reward
 
 
@@ -603,7 +661,7 @@ class hind_propulsion:
     command = env.command_manager.get_command(command_name)
     assert command is not None
     assert sensor.data.current_contact_time is not None
-    speed = asset.data.root_link_lin_vel_b[:, 0]
+    speed = _center_of_mass_velocity_b(asset, asset_cfg)[:, 0]
     acceleration = torch.where(
       self.initialized,
       (speed - self.previous_speed) / env.step_dt,
@@ -616,10 +674,14 @@ class hind_propulsion:
     hind_contact = (sensor.data.current_contact_time[:, 2:] > 0.0).any(dim=1)
     active = command[:, 0] > speed_threshold
     reward = torch.clamp(acceleration / target_acceleration, min=0.0, max=1.0)
-    reward *= (in_push_phase & hind_contact & active).float()
-    env.extras["log"]["Metrics/hind_push_acceleration"] = torch.clamp(
-      acceleration, min=0.0
-    ).mean()
+    push_gate = in_push_phase & hind_contact & active
+    reward *= push_gate.float()
+    positive_acceleration = torch.clamp(acceleration, min=0.0)
+    push_count = torch.clamp(push_gate.float().sum(), min=1.0)
+    env.extras["log"]["Metrics/hind_push_acceleration"] = (
+      positive_acceleration * push_gate.float()
+    ).sum() / push_count
+    env.extras["log"]["Metrics/hind_push_active_fraction"] = push_gate.float().mean()
     return reward
 
   def reset(self, env_ids: torch.Tensor) -> None:

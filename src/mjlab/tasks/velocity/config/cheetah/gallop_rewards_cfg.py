@@ -47,20 +47,23 @@ def configure_gallop_rewards(
   cfg.rewards["track_linear_velocity"].func = mdp.track_center_of_mass_linear_velocity
   cfg.rewards["track_linear_velocity"].weight = 5.0
   cfg.rewards["track_linear_velocity"].params["std"] = 2.0
-  cfg.rewards["track_angular_velocity"].weight = 2.0
-  cfg.rewards["upright"].weight = 0.5
+  cfg.rewards["track_angular_velocity"].func = mdp.track_yaw_velocity
+  cfg.rewards["track_angular_velocity"].weight = 1.5
+  cfg.rewards["upright"].weight = 0.3
   pose.weight = 0.2
-  cfg.rewards["action_rate_l2"].weight = -0.01
+  cfg.rewards["action_rate_l2"].weight = -0.02
   cfg.rewards["body_ang_vel"].weight = 0.0
   cfg.rewards["angular_momentum"].weight = 0.0
   cfg.rewards["air_time"].weight = 0.25
   cfg.rewards["air_time"].params["threshold_max"] = 0.35
+  cfg.rewards["foot_slip"].weight = -0.3
+  cfg.rewards["soft_landing"].weight = -3.0e-4
 
   cfg.rewards.update(
     {
       "forward_velocity_progress": RewardTermCfg(
         func=mdp.forward_velocity_progress,
-        weight=8.0,
+        weight=5.0,
         params={"command_name": "twist"},
       ),
       "planar_drift_l2": RewardTermCfg(func=mdp.planar_drift_l2, weight=-1.0),
@@ -98,7 +101,7 @@ def configure_gallop_rewards(
       ),
       "feline_gallop_contacts": RewardTermCfg(
         func=mdp.feline_gallop_contacts,
-        weight=2.0,
+        weight=4.0,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
@@ -110,24 +113,26 @@ def configure_gallop_rewards(
             (0.54, 0.73),  # RR
           ),
           "command_threshold": 1.0,
+          "stance_weight": 3.0,
+          "swing_weight": 0.25,
         },
       ),
       "stride_length": RewardTermCfg(
         func=mdp.stride_length,
-        weight=3.0,
+        weight=5.0,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
           "asset_cfg": _feet(site_names),
-          "base_stride": 0.10,
-          "speed_slope": 0.035,
-          "max_stride": 0.24,
-          "std": 0.04,
+          "base_stride": 0.08,
+          "speed_slope": 0.02,
+          "max_stride": 0.18,
+          "std": 0.07,
         },
       ),
       "flight_phase": RewardTermCfg(
         func=mdp.flight_phase,
-        weight=0.5,
+        weight=0.8,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
@@ -141,7 +146,7 @@ def configure_gallop_rewards(
         site_names,
         feet_sensor_name,
         gait_period,
-        weight=3.5,
+        weight=4.5,
         front_target_x=0.24,
         hind_target_x=-0.20,
         phase_windows=((0.0, 0.16), (0.80, 1.0)),
@@ -151,7 +156,7 @@ def configure_gallop_rewards(
         site_names,
         feet_sensor_name,
         gait_period,
-        weight=4.0,
+        weight=4.5,
         front_target_x=0.10,
         hind_target_x=-0.04,
         phase_windows=((0.40, 0.54),),
@@ -159,14 +164,14 @@ def configure_gallop_rewards(
       ),
       "hind_propulsion": RewardTermCfg(
         func=mdp.hind_propulsion,
-        weight=2.0,
+        weight=4.0,
         params={
           "sensor_name": feet_sensor_name,
           "command_name": "twist",
           "asset_cfg": SceneEntityCfg("robot"),
           "period": gait_period,
           "push_window": (0.54, 0.80),
-          "target_acceleration": 8.0,
+          "target_acceleration": 5.0,
           "speed_threshold": 2.0,
         },
       ),
@@ -207,6 +212,14 @@ def configure_gallop_rewards(
           "command_threshold": 0.1,
         },
       ),
+      "action_l2": RewardTermCfg(func=mdp.action_l2, weight=-0.005),
+      "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.015),
+      "joint_torques_l2": RewardTermCfg(
+        func=mdp.joint_torques_l2,
+        weight=-0.003,
+        params={"asset_cfg": SceneEntityCfg("robot", actuator_names=[".*"])},
+      ),
+      "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-1.0e-4),
       "joint_acc_l2": RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7),
     }
   )
@@ -242,6 +255,7 @@ def _flight_posture(
       "symmetry_std": 0.05,
       "phase_period": period,
       "phase_windows": phase_windows,
+      "require_flight": False,
       "metric_prefix": metric_prefix,
     },
   )

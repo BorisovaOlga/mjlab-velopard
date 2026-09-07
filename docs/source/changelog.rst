@@ -10,6 +10,10 @@ Changed
 
 - Changed Cheetah gallop velocity tasks to track whole-robot center-of-mass
   velocity and ramp straight-line command speed through early high-speed stages.
+- Tuned Cheetah gallop rewards to reduce paddling-like high-frequency motion
+  with action, acceleration, torque, slip, landing, and stride regularization.
+- Reweighted Cheetah gallop phase rewards toward stance timing, ungated posture
+  shaping, COM-based hind propulsion, and yaw-only heading stabilization.
 
 Version 1.6.0 (August 8, 2026)
 ------------------------------
