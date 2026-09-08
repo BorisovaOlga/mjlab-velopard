@@ -5,8 +5,21 @@ Changelog
 Upcoming version (not yet released)
 -----------------------------------
 
+Added
+^^^^^
+
+- Added clock-free active- and rigid-spine Reborn Cheetah velocity tasks with
+  torque-speed-limited actuators, performance-driven command curriculum, and
+  matched spine ablation metrics.
+- Added an active-spine Reborn Cheetah ablation without a dedicated spine reward.
+
 Changed
 ^^^^^^^
+
+- Revised the Reborn Cheetah reward-driven pipeline with frontier-gated command
+  stages, touchdown debouncing, frequency-invariant pair scoring, normalized
+  spine-leg coordination, contact-conditioned spine phases, explicit footfall
+  order and flight reward, and a free-base straight-running corridor.
 
 - Changed Cheetah gallop velocity tasks to track whole-robot center-of-mass
   velocity and ramp straight-line command speed through early high-speed stages.

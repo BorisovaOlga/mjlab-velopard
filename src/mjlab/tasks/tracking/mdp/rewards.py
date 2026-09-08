@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from mjlab.entity import Entity
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 from mjlab.utils.lab_api.math import quat_error_magnitude
 
@@ -39,6 +41,41 @@ def motion_global_anchor_orientation_error_exp(
   command = cast(MotionCommand, env.command_manager.get_term(command_name))
   error = quat_error_magnitude(command.anchor_quat_w, command.robot_anchor_quat_w) ** 2
   return torch.exp(-error / std**2)
+
+
+def motion_joint_position_error_exp(
+  env: ManagerBasedRlEnv, command_name: str, std: float
+) -> torch.Tensor:
+  """Reward generalized-coordinate pose tracking, including the spine hinge."""
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  error = torch.mean(torch.square(command.joint_pos - command.robot_joint_pos), dim=-1)
+  return torch.exp(-error / std**2)
+
+
+def motion_joint_velocity_error_exp(
+  env: ManagerBasedRlEnv, command_name: str, std: float
+) -> torch.Tensor:
+  """Reward matching joint velocity so fast spine reversals remain phase-locked."""
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  error = torch.mean(torch.square(command.joint_vel - command.robot_joint_vel), dim=-1)
+  return torch.exp(-error / std**2)
+
+
+def joint_torque_l2(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+  """Return the squared actuator torque used for effort regularization."""
+  asset: Entity = env.scene[asset_cfg.name]
+  torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+  return torch.sum(torch.square(torque), dim=-1)
+
+
+def joint_abs_mechanical_power(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Return absolute actuator mechanical power for selected joints."""
+  asset: Entity = env.scene[asset_cfg.name]
+  torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+  velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  return torch.sum(torch.abs(torque * velocity), dim=-1)
 
 
 def motion_relative_body_position_error_exp(

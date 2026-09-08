@@ -1,0 +1,5 @@
+- https://arxiv.org/html/2510.01984
+- https://arxiv.org/html/2605.27909
+- https://arxiv.org/html/2606.14433
+- https://arxiv.org/html/2607.24036v1
+- https://arxiv.org/html/2605.10063

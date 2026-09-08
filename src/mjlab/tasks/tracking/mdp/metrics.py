@@ -4,10 +4,95 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from mjlab.entity import Entity
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.utils.lab_api.math import quat_error_magnitude
 
 if TYPE_CHECKING:
+  from mjlab.envs import ManagerBasedRlEnv
   from mjlab.tasks.tracking.mdp.commands import MotionCommand
+
+
+def joint_abs_torque(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+  """Sum of absolute actuator torque for selected joints."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.abs(asset.data.qfrc_actuator[:, asset_cfg.joint_ids]), dim=-1)
+
+
+def joint_abs_velocity(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Sum of absolute joint velocity for selected joints."""
+  asset: Entity = env.scene[asset_cfg.name]
+  return torch.sum(torch.abs(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=-1)
+
+
+def joint_abs_mechanical_power(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Absolute actuator mechanical power for selected joints."""
+  asset: Entity = env.scene[asset_cfg.name]
+  torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+  velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
+  return torch.sum(torch.abs(torque * velocity), dim=-1)
+
+
+def joint_positive_mechanical_power(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Positive actuator mechanical work rate for selected joints."""
+  asset: Entity = env.scene[asset_cfg.name]
+  power = (
+    asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+    * asset.data.joint_vel[:, asset_cfg.joint_ids]
+  )
+  return torch.clamp(power, min=0.0).sum(dim=-1)
+
+
+def joint_absorbed_mechanical_power(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Magnitude of negative actuator mechanical work rate."""
+  asset: Entity = env.scene[asset_cfg.name]
+  power = (
+    asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+    * asset.data.joint_vel[:, asset_cfg.joint_ids]
+  )
+  return torch.clamp(-power, min=0.0).sum(dim=-1)
+
+
+def joint_abs_mechanical_energy(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Absolute actuator mechanical energy for one simulation step."""
+  return joint_abs_mechanical_power(env, asset_cfg) * env.step_dt
+
+
+def joint_positive_mechanical_energy(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Positive actuator mechanical energy for one simulation step."""
+  return joint_positive_mechanical_power(env, asset_cfg) * env.step_dt
+
+
+def joint_absorbed_mechanical_energy(
+  env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+  """Absorbed actuator mechanical energy for one simulation step."""
+  return joint_absorbed_mechanical_power(env, asset_cfg) * env.step_dt
+
+
+def spine_power_fraction(
+  env: ManagerBasedRlEnv,
+  spine_cfg: SceneEntityCfg,
+  asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+  """Fraction of absolute actuator power supplied by the spine."""
+  asset: Entity = env.scene[asset_cfg.name]
+  power = torch.abs(asset.data.qfrc_actuator * asset.data.joint_vel)
+  total_power = power.sum(dim=-1)
+  spine_power = power[:, spine_cfg.joint_ids].sum(dim=-1)
+  return spine_power / torch.clamp(total_power, min=1.0e-6)
 
 
 def compute_mpkpe(command: MotionCommand) -> torch.Tensor:

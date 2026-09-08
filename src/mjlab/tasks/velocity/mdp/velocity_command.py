@@ -36,6 +36,9 @@ class UniformVelocityCommand(CommandTerm):
 
     self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
     self.vel_command_w = torch.zeros(self.num_envs, 3, device=self.device)
+    self.target_vel_command_b = torch.zeros_like(self.vel_command_b)
+    self.target_vel_command_w = torch.zeros_like(self.vel_command_w)
+    self.acceleration_limit = torch.zeros(self.num_envs, device=self.device)
     self.heading_target = torch.zeros(self.num_envs, device=self.device)
     self.heading_error = torch.zeros(self.num_envs, device=self.device)
     self.is_heading_env = torch.zeros(
@@ -72,6 +75,8 @@ class UniformVelocityCommand(CommandTerm):
     )
 
   def _resample_command(self, env_ids: torch.Tensor) -> None:
+    previous_command_b = self.vel_command_b[env_ids].clone()
+    previous_command_w = self.vel_command_w[env_ids].clone()
     r = torch.empty(len(env_ids), device=self.device)
     self.vel_command_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.lin_vel_x)
     self.vel_command_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.lin_vel_y)
@@ -84,9 +89,6 @@ class UniformVelocityCommand(CommandTerm):
 
     # Randomly assign world-frame envs.
     self.is_world_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_world_envs
-    # Copy sampled velocities as world-frame reference for world envs.
-    self.vel_command_w[env_ids] = self.vel_command_b[env_ids]
-
     # Forward-only envs: positive lin_vel_x, zero lateral and angular.
     self.is_forward_env[env_ids] = r.uniform_(0.0, 1.0) <= self.cfg.rel_forward_envs
     fwd_ids = env_ids[self.is_forward_env[env_ids]]
@@ -96,6 +98,15 @@ class UniformVelocityCommand(CommandTerm):
       )
       self.vel_command_b[fwd_ids, 1] = 0.0
       self.vel_command_b[fwd_ids, 2] = 0.0
+
+    # Copy the final sampled velocities as world-frame references.
+    self.vel_command_w[env_ids] = self.vel_command_b[env_ids]
+    self.target_vel_command_b[env_ids] = self.vel_command_b[env_ids]
+    self.target_vel_command_w[env_ids] = self.vel_command_w[env_ids]
+    if self.cfg.acceleration_limit_range is not None:
+      self.acceleration_limit[env_ids] = r.uniform_(*self.cfg.acceleration_limit_range)
+      self.vel_command_b[env_ids] = previous_command_b
+      self.vel_command_w[env_ids] = previous_command_w
 
   def reset(self, env_ids: torch.Tensor | slice | None) -> dict[str, float]:
     extras = super().reset(env_ids)
@@ -113,8 +124,23 @@ class UniformVelocityCommand(CommandTerm):
     return extras
 
   def _update_command(self, env_ids: torch.Tensor | None = None) -> None:
-    # Pure function of the current state; refreshing all envs is safe.
-    del env_ids
+    update_ids = (
+      torch.arange(self.num_envs, device=self.device) if env_ids is None else env_ids
+    )
+    if self.cfg.acceleration_limit_range is not None:
+      max_delta = self.acceleration_limit[update_ids].unsqueeze(1) * self._env.step_dt
+      body_delta = torch.clamp(
+        self.target_vel_command_b[update_ids] - self.vel_command_b[update_ids],
+        min=-max_delta,
+        max=max_delta,
+      )
+      world_delta = torch.clamp(
+        self.target_vel_command_w[update_ids] - self.vel_command_w[update_ids],
+        min=-max_delta,
+        max=max_delta,
+      )
+      self.vel_command_b[update_ids] += body_delta
+      self.vel_command_w[update_ids] += world_delta
     if self.cfg.heading_command:
       self.heading_error = wrap_to_pi(self.heading_target - self.robot.data.heading_w)
       heading_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
@@ -298,6 +324,12 @@ class UniformVelocityCommandCfg(CommandTermCfg):
   init_velocity_prob: float = 0.0
   """Probability that an env starts its episode already moving at its sampled
   planar command velocity. Applied on reset only."""
+  acceleration_limit_range: tuple[float, float] | None = None
+  """Optional per-episode acceleration limit in m/s^2 (and rad/s^2).
+
+  When set, newly sampled commands become targets and the emitted command ramps
+  toward them instead of changing discontinuously.
+  """
 
   @dataclass
   class Ranges:
@@ -324,3 +356,10 @@ class UniformVelocityCommandCfg(CommandTermCfg):
         "The velocity command has heading commands active (heading_command=True) but "
         "the `ranges.heading` parameter is set to None."
       )
+    if self.acceleration_limit_range is not None:
+      low, high = self.acceleration_limit_range
+      if low <= 0.0 or high < low:
+        raise ValueError(
+          "acceleration_limit_range must satisfy 0 < low <= high, "
+          f"got {self.acceleration_limit_range}."
+        )

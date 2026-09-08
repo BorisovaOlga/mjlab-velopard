@@ -7,6 +7,7 @@ import torch
 from mjlab.entity import Entity
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import wrap_to_pi
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -100,3 +101,21 @@ def terrain_edge_reached(
   at_edge &= env.episode_length_buf > 2
 
   return at_edge
+
+
+def excessive_straight_line_deviation(
+  env: ManagerBasedRlEnv,
+  maximum_lateral_displacement: float = 0.75,
+  maximum_heading_error: float = 0.79,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Terminate trajectories that leave the forward-running corridor."""
+  asset: Entity = env.scene[asset_cfg.name]
+  lateral_displacement = torch.abs(
+    asset.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
+  )
+  heading_error = torch.abs(wrap_to_pi(asset.data.heading_w))
+  outside = (lateral_displacement > maximum_lateral_displacement) | (
+    heading_error > maximum_heading_error
+  )
+  return outside & (env.episode_length_buf > 2)

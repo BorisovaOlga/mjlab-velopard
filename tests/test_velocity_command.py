@@ -118,3 +118,31 @@ def test_mid_episode_resample_does_not_write_velocity(device):
     torch.zeros_like(robot.data.root_link_lin_vel_b),
     atol=1e-6,
   )
+
+
+def test_acceleration_limited_command_ramps_after_resample(device):
+  scene, _ = make_scene_and_sim(
+    device, load_fixture_xml("floating_base_articulated"), sensors=(), num_envs=2
+  )
+  env = cast(
+    "ManagerBasedRlEnv",
+    SimpleNamespace(scene=scene, num_envs=2, device=device, step_dt=0.02),
+  )
+  cfg = UniformVelocityCommandCfg(
+    entity_name="robot",
+    resampling_time_range=(1e9, 1e9),
+    acceleration_limit_range=(2.0, 2.0),
+    rel_heading_envs=0.0,
+    ranges=UniformVelocityCommandCfg.Ranges(
+      lin_vel_x=(1.0, 1.0), lin_vel_y=(0.0, 0.0), ang_vel_z=(0.0, 0.0)
+    ),
+  )
+  term = cfg.build(env)
+  env_ids = torch.arange(2, device=device)
+
+  term.reset(env_ids=env_ids)
+  assert torch.allclose(term.vel_command_b, torch.zeros_like(term.vel_command_b))
+  term.compute(dt=env.step_dt)
+
+  assert torch.allclose(term.vel_command_b[:, 0], torch.full((2,), 0.04, device=device))
+  assert torch.allclose(term.target_vel_command_b[:, 0], torch.ones(2, device=device))

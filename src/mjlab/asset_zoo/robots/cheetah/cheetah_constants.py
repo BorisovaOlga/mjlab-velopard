@@ -10,11 +10,10 @@ from pathlib import Path
 import mujoco
 
 from mjlab import MJLAB_SRC_PATH
-from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.actuator import BuiltinPositionActuatorCfg, DcMotorActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.actuator import ElectricActuator, reflected_inertia
-from mjlab.utils.spec_config import CollisionCfg
 from mjlab.utils.actuator import ElectricActuator, rpm_to_rad
+from mjlab.utils.spec_config import CollisionCfg
 
 ##
 # MJCF and assets.
@@ -30,6 +29,15 @@ def get_spec() -> mujoco.MjSpec:
   return mujoco.MjSpec.from_file(str(CHEETAH_XML))
 
 
+def _get_rigid_spine_spec() -> mujoco.MjSpec:
+  """Load the Cheetah with an effectively locked pitch spine for ablations."""
+  spec = get_spec()
+  spine_joint = spec.joint("body_pitch_joint")
+  spine_joint.range[:] = (-1.0e-4, 1.0e-4)
+  spine_joint.damping[0] = 10.0
+  return spec
+
+
 ##
 # Actuator config (lightweight)
 ##
@@ -43,19 +51,19 @@ KNEE_GEAR_RATIO = HIP_GEAR_RATIO * 1.5
 SPINE_GEAR_RATIO = 6
 
 HIP_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, HIP_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),
   effort_limit=7.0,
 )
 KNEE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.005399, #reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
+  reflected_inertia=0.005399,  # reflected_inertia(ROTOR_INERTIA, KNEE_GEAR_RATIO),
   velocity_limit=rpm_to_rad(435),
   effort_limit=7.0,
 )
 SPINE_ACTUATOR = ElectricActuator(
-  reflected_inertia= 0.00089, #reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
-  velocity_limit= rpm_to_rad(180),#20.0,
-  effort_limit= 7.0,
+  reflected_inertia=0.00089,  # reflected_inertia(ROTOR_INERTIA, SPINE_GEAR_RATIO),
+  velocity_limit=rpm_to_rad(180),  # 20.0,
+  effort_limit=7.0,
 )
 
 NATURAL_FREQ = 10 * 2.0 * 3.1415926535  # 10Hz
@@ -90,6 +98,37 @@ CHEETAH_SPINE_ACTUATOR_CFG = BuiltinPositionActuatorCfg(
   stiffness=STIFFNESS_SPINE,
   damping=DAMPING_SPINE,
   effort_limit=SPINE_ACTUATOR.effort_limit,
+  armature=SPINE_ACTUATOR.reflected_inertia,
+)
+
+# Reborn uses the same provisional motor constants as the original model, but
+# actually enforces their no-load speeds. The original built-in position
+# actuators only enforce effort_limit and are retained for baseline continuity.
+REBORN_CHEETAH_HIP_ACTUATOR_CFG = DcMotorActuatorCfg(
+  target_names_expr=(".*hip_pitch_joint", ".*hip_roll_joint"),
+  stiffness=STIFFNESS_HIP,
+  damping=DAMPING_HIP,
+  effort_limit=HIP_ACTUATOR.effort_limit,
+  saturation_effort=HIP_ACTUATOR.effort_limit,
+  velocity_limit=HIP_ACTUATOR.velocity_limit,
+  armature=HIP_ACTUATOR.reflected_inertia,
+)
+REBORN_CHEETAH_KNEE_ACTUATOR_CFG = DcMotorActuatorCfg(
+  target_names_expr=(".*knee_pitch_joint",),
+  stiffness=STIFFNESS_KNEE,
+  damping=DAMPING_KNEE,
+  effort_limit=KNEE_ACTUATOR.effort_limit,
+  saturation_effort=KNEE_ACTUATOR.effort_limit,
+  velocity_limit=KNEE_ACTUATOR.velocity_limit,
+  armature=KNEE_ACTUATOR.reflected_inertia,
+)
+REBORN_CHEETAH_SPINE_ACTUATOR_CFG = DcMotorActuatorCfg(
+  target_names_expr=("body_pitch_joint",),
+  stiffness=STIFFNESS_SPINE,
+  damping=DAMPING_SPINE,
+  effort_limit=SPINE_ACTUATOR.effort_limit,
+  saturation_effort=SPINE_ACTUATOR.effort_limit,
+  velocity_limit=SPINE_ACTUATOR.velocity_limit,
   armature=SPINE_ACTUATOR.reflected_inertia,
 )
 
@@ -161,6 +200,15 @@ CHEETAH_ARTICULATION = EntityArticulationInfoCfg(
   soft_joint_pos_limit_factor=0.9,
 )
 
+REBORN_CHEETAH_ARTICULATION = EntityArticulationInfoCfg(
+  actuators=(
+    REBORN_CHEETAH_HIP_ACTUATOR_CFG,
+    REBORN_CHEETAH_KNEE_ACTUATOR_CFG,
+    REBORN_CHEETAH_SPINE_ACTUATOR_CFG,
+  ),
+  soft_joint_pos_limit_factor=0.9,
+)
+
 
 def get_cheetah_robot_cfg() -> EntityCfg:
   """Get a fresh Cheetah robot configuration instance.
@@ -173,6 +221,16 @@ def get_cheetah_robot_cfg() -> EntityCfg:
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
     articulation=CHEETAH_ARTICULATION,
+  )
+
+
+def get_reborn_cheetah_robot_cfg(*, rigid_spine: bool = False) -> EntityCfg:
+  """Get the Cheetah with torque-speed-limited actuators for Reborn tasks."""
+  return EntityCfg(
+    init_state=INIT_STATE,
+    collisions=(FULL_COLLISION,),
+    spec_fn=_get_rigid_spine_spec if rigid_spine else get_spec,
+    articulation=REBORN_CHEETAH_ARTICULATION,
   )
 
 

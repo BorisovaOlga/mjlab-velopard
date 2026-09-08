@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,7 +12,7 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import BuiltinSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity.mdp.terrain_utils import terrain_normal_from_sensors
-from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
+from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, wrap_to_pi
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
@@ -145,6 +146,27 @@ def planar_drift_l2(
   env.extras["log"]["Metrics/lateral_speed_abs"] = lateral_velocity.abs().mean()
   env.extras["log"]["Metrics/yaw_rate_abs"] = yaw_rate.abs().mean()
   return torch.square(lateral_velocity) + torch.square(yaw_rate)
+
+
+def straight_line_deviation_l2(
+  env: ManagerBasedRlEnv,
+  lateral_tolerance: float = 0.25,
+  heading_tolerance: float = 0.26,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize leaving a world-frame forward corridor without constraining the base."""
+  asset: Entity = env.scene[asset_cfg.name]
+  lateral_error = torch.abs(
+    asset.data.root_link_pos_w[:, 1] - env.scene.env_origins[:, 1]
+  )
+  heading_error = torch.abs(wrap_to_pi(asset.data.heading_w))
+  lateral_excess = torch.clamp(lateral_error - lateral_tolerance, min=0.0)
+  heading_excess = torch.clamp(heading_error - heading_tolerance, min=0.0)
+  env.extras["log"]["Metrics/lateral_displacement_abs"] = lateral_error.mean()
+  env.extras["log"]["Metrics/heading_error_abs"] = heading_error.mean()
+  return torch.square(lateral_excess / lateral_tolerance) + torch.square(
+    heading_excess / heading_tolerance
+  )
 
 
 class upright:
@@ -332,6 +354,7 @@ class footfall_sequence:
 
   def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
     del cfg
+    self.last_touchdown = torch.full((env.num_envs, 4), -1.0, device=env.device)
     self.expected_phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
 
   def __call__(
@@ -342,15 +365,20 @@ class footfall_sequence:
     command_name: str,
     command_threshold: float = 0.3,
     wrong_contact_penalty: float = 1.0,
+    min_period: float = 0.12,
   ) -> torch.Tensor:
     sensor: ContactSensor = env.scene[sensor_name]
     command = env.command_manager.get_command(command_name)
     assert command is not None
     first_contact = sensor.compute_first_contact(dt=env.step_dt)
+    time = env.episode_length_buf * env.step_dt
+    interval = time.unsqueeze(1) - self.last_touchdown
+    accepted = first_contact & ((self.last_touchdown < 0.0) | (interval >= min_period))
+    self.last_touchdown = torch.where(accepted, time.unsqueeze(1), self.last_touchdown)
     sequence_tensor = torch.tensor(sequence, device=env.device, dtype=torch.long)
     expected_foot = sequence_tensor[self.expected_phase]
-    correct = first_contact.gather(1, expected_foot.unsqueeze(1)).squeeze(1)
-    any_contact = first_contact.any(dim=1)
+    correct = accepted.gather(1, expected_foot.unsqueeze(1)).squeeze(1)
+    any_contact = accepted.any(dim=1)
     wrong = any_contact & ~correct
     active = command[:, 0] > command_threshold
 
@@ -362,10 +390,203 @@ class footfall_sequence:
       self.expected_phase,
     )
     env.extras["log"]["Metrics/gallop_correct_touchdown"] = correct.float().mean()
+    env.extras["log"]["Metrics/gallop_accepted_touchdown"] = (
+      accepted.any(dim=1).float().mean()
+    )
     return reward
 
   def reset(self, env_ids: torch.Tensor) -> None:
     self.expected_phase[env_ids] = 0
+    self.last_touchdown[env_ids] = -1.0
+
+
+class gallop_pair_sequence:
+  """Reward a self-timed hind-pair then front-pair contact sequence."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.last_touchdown = torch.full((env.num_envs, 4), -1.0, device=env.device)
+    self.pair_seen = torch.zeros((env.num_envs, 2), device=env.device, dtype=torch.bool)
+    self.expected_pair = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    pair_window: float = 0.12,
+    min_period: float = 0.12,
+    command_threshold: float = 1.0,
+    wrong_pair_penalty: float = 0.25,
+  ) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    touchdown = sensor.compute_first_contact(dt=env.step_dt)
+    time = env.episode_length_buf * env.step_dt
+    interval = time.unsqueeze(1) - self.last_touchdown
+    accepted = touchdown & ((self.last_touchdown < 0.0) | (interval >= min_period))
+    self.last_touchdown = torch.where(accepted, time.unsqueeze(1), self.last_touchdown)
+
+    pair_indices = ((2, 3), (0, 1))
+    pair_complete = torch.zeros((env.num_envs, 2), device=env.device, dtype=torch.bool)
+    for pair_index, (left, right) in enumerate(pair_indices):
+      pair_times = self.last_touchdown[:, (left, right)]
+      stale = self.pair_seen[:, pair_index] & (
+        (time - pair_times.min(dim=1).values) > pair_window
+      )
+      self.pair_seen[:, pair_index] &= ~stale
+      self.pair_seen[:, pair_index] |= accepted[:, (left, right)].any(dim=1)
+      pair_complete[:, pair_index] = self.pair_seen[:, pair_index] & (
+        (pair_times.max(dim=1).values - pair_times.min(dim=1).values) <= pair_window
+      )
+    pair_started = pair_complete
+    self.pair_seen &= ~pair_complete
+
+    expected = self.expected_pair
+    expected_started = pair_started.gather(1, expected.unsqueeze(1)).squeeze(1)
+    wrong_started = pair_started.any(dim=1) & ~expected_started
+    active = command[:, 0] > command_threshold
+    reward = expected_started.float() - wrong_pair_penalty * wrong_started.float()
+    reward *= active.float()
+    self.expected_pair = torch.where(
+      expected_started & active, (expected + 1) % 2, expected
+    )
+    env.extras["log"]["Metrics/gallop_pair_sequence_correct"] = (
+      expected_started.float().mean()
+    )
+    env.extras["log"]["Metrics/gallop_hind_pair_window"] = (
+      pair_complete[:, 0].float().mean()
+    )
+    env.extras["log"]["Metrics/gallop_front_pair_window"] = (
+      pair_complete[:, 1].float().mean()
+    )
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_touchdown[env_ids] = -1.0
+    self.pair_seen[env_ids] = False
+    self.expected_pair[env_ids] = 0
+
+
+class gallop_pair_phase:
+  """Reward non-zero touchdown phase offsets within fore and hind leg pairs.
+
+  Unlike a global gait clock, this term estimates stride period from touchdown
+  events. It constrains only the ordering and offset inside each pair, leaving
+  fore-to-hind timing, duty factor, and stride frequency to the policy.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    num_feet = 4
+    initial_period = cfg.params["initial_period"]
+    self.initial_period = initial_period
+    self.last_touchdown = torch.full((env.num_envs, num_feet), -1.0, device=env.device)
+    self.stride_period = torch.full(
+      (env.num_envs, num_feet), initial_period, device=env.device
+    )
+    self.last_pair_error = torch.ones((env.num_envs, 2), device=env.device)
+    self.last_pair_score = torch.zeros((env.num_envs, 2), device=env.device)
+    self.last_pair_update = torch.full((env.num_envs, 2), -1.0, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    pairs: tuple[tuple[int, int], tuple[int, int]],
+    target_offsets: tuple[float, float],
+    initial_period: float,
+    offset_std: float,
+    min_period: float = 0.15,
+    max_period: float = 1.0,
+    max_pair_age_cycles: float = 1.5,
+    command_threshold: float = 1.5,
+  ) -> torch.Tensor:
+    del initial_period
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    touchdown = sensor.compute_first_contact(dt=env.step_dt)
+    time = env.episode_length_buf * env.step_dt
+
+    raw_touchdown = touchdown
+    accepted_touchdown = torch.zeros_like(raw_touchdown)
+    for foot in range(self.last_touchdown.shape[1]):
+      event = raw_touchdown[:, foot]
+      interval = time - self.last_touchdown[:, foot]
+      accepted = event & (
+        (self.last_touchdown[:, foot] < 0.0) | (interval >= min_period)
+      )
+      accepted_touchdown[:, foot] = accepted
+      valid_interval = (
+        accepted
+        & (self.last_touchdown[:, foot] >= 0.0)
+        & (interval >= min_period)
+        & (interval <= max_period)
+      )
+      self.stride_period[:, foot] = torch.where(
+        valid_interval, interval, self.stride_period[:, foot]
+      )
+      self.last_touchdown[:, foot] = torch.where(
+        accepted, time, self.last_touchdown[:, foot]
+      )
+
+    for pair_index, ((leader, follower), target) in enumerate(
+      zip(pairs, target_offsets, strict=True)
+    ):
+      follower_event = accepted_touchdown[:, follower]
+      leader_seen = self.last_touchdown[:, leader] >= 0.0
+      phase_offset = (
+        (time - self.last_touchdown[:, leader])
+        / torch.clamp(self.stride_period[:, leader], min=min_period)
+      ) % 1.0
+      error = torch.abs((phase_offset - target + 0.5) % 1.0 - 0.5)
+      valid = follower_event & leader_seen
+      score = torch.exp(-torch.square(error / offset_std))
+      self.last_pair_error[:, pair_index] = torch.where(
+        valid, error, self.last_pair_error[:, pair_index]
+      )
+      self.last_pair_score[:, pair_index] = torch.where(
+        valid, score, self.last_pair_score[:, pair_index]
+      )
+      self.last_pair_update[:, pair_index] = torch.where(
+        valid, time, self.last_pair_update[:, pair_index]
+      )
+
+    active = command[:, 0] > command_threshold
+    pair_period = torch.stack(
+      [self.stride_period[:, leader] for leader, _ in pairs], dim=1
+    )
+    pair_age = time.unsqueeze(1) - self.last_pair_update
+    fresh = (self.last_pair_update >= 0.0) & (
+      pair_age <= max_pair_age_cycles * pair_period
+    )
+    reward = self.last_pair_score.prod(dim=1)
+    reward *= fresh.all(dim=1).float() * active.float()
+    env.extras["log"]["Metrics/gallop_fore_pair_phase_error"] = self.last_pair_error[
+      :, 0
+    ].mean()
+    env.extras["log"]["Metrics/gallop_hind_pair_phase_error"] = self.last_pair_error[
+      :, 1
+    ].mean()
+    env.extras["log"]["Metrics/gallop_raw_touchdown_fraction"] = (
+      raw_touchdown.any(dim=1).float().mean()
+    )
+    env.extras["log"]["Metrics/gallop_pair_touchdown_fraction"] = (
+      accepted_touchdown.any(dim=1).float().mean()
+    )
+    env.extras["log"]["Metrics/gallop_rejected_touchdown_fraction"] = (
+      (raw_touchdown & ~accepted_touchdown).any(dim=1).float().mean()
+    )
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_touchdown[env_ids] = -1.0
+    self.stride_period[env_ids] = self.initial_period
+    self.last_pair_error[env_ids] = 1.0
+    self.last_pair_score[env_ids] = 0.0
+    self.last_pair_update[env_ids] = -1.0
 
 
 def clock_gait(
@@ -554,6 +775,99 @@ def flight_phase(
   return flight.float()
 
 
+class spine_contact_phase:
+  """Couple spine extension/compression to recent pair touchdowns."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.last_touchdown = torch.full((env.num_envs, 4), -1.0, device=env.device)
+    self.pair_seen = torch.zeros((env.num_envs, 2), device=env.device, dtype=torch.bool)
+    self.pair_completion_time = torch.full((env.num_envs, 2), -1.0, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str,
+    spine_cfg: SceneEntityCfg,
+    extension_target: float = 0.22,
+    compression_target: float = -0.32,
+    position_std: float = 0.16,
+    velocity_scale: float = 0.8,
+    pair_window: float = 0.12,
+    pair_hold: float = 0.12,
+    min_period: float = 0.12,
+    speed_threshold: float = 1.5,
+  ) -> torch.Tensor:
+    """Use hind-pair touchdown for extension and front-pair touchdown for compression."""
+    asset: Entity = env.scene[spine_cfg.name]
+    sensor: ContactSensor = env.scene[sensor_name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    touchdown = sensor.compute_first_contact(dt=env.step_dt)
+    time = env.episode_length_buf * env.step_dt
+    interval = time.unsqueeze(1) - self.last_touchdown
+    accepted = touchdown & ((self.last_touchdown < 0.0) | (interval >= min_period))
+    self.last_touchdown = torch.where(accepted, time.unsqueeze(1), self.last_touchdown)
+
+    pair_indices = ((2, 3), (0, 1))
+    pair_complete = torch.zeros((env.num_envs, 2), device=env.device, dtype=torch.bool)
+    for pair_index, (left, right) in enumerate(pair_indices):
+      pair_times = self.last_touchdown[:, (left, right)]
+      stale = self.pair_seen[:, pair_index] & (
+        (time - pair_times.min(dim=1).values) > pair_window
+      )
+      self.pair_seen[:, pair_index] &= ~stale
+      self.pair_seen[:, pair_index] |= accepted[:, (left, right)].any(dim=1)
+      pair_complete[:, pair_index] = self.pair_seen[:, pair_index] & (
+        (pair_times.max(dim=1).values - pair_times.min(dim=1).values) <= pair_window
+      )
+    self.pair_completion_time = torch.where(
+      pair_complete, time.unsqueeze(1), self.pair_completion_time
+    )
+    self.pair_seen &= ~pair_complete
+    pair_recent = (self.pair_completion_time >= 0.0) & (
+      (time.unsqueeze(1) - self.pair_completion_time) <= pair_hold
+    )
+    hind_contact = pair_recent[:, 0]
+    front_contact = pair_recent[:, 1]
+    exclusive_hind = hind_contact & ~front_contact
+    exclusive_front = front_contact & ~hind_contact
+
+    spine_position = asset.data.joint_pos[:, spine_cfg.joint_ids].squeeze(1)
+    spine_velocity = asset.data.joint_vel[:, spine_cfg.joint_ids].squeeze(1)
+    extension_position = torch.exp(
+      -torch.square((spine_position - extension_target) / position_std)
+    )
+    compression_position = torch.exp(
+      -torch.square((spine_position - compression_target) / position_std)
+    )
+    extension_direction = torch.sigmoid(spine_velocity / velocity_scale)
+    compression_direction = torch.sigmoid(-spine_velocity / velocity_scale)
+    extension_score = extension_position * extension_direction
+    compression_score = compression_position * compression_direction
+    reward = torch.where(
+      exclusive_hind,
+      extension_score,
+      torch.where(exclusive_front, compression_score, 0.0),
+    )
+    active = command[:, 0] > speed_threshold
+    reward *= active.float()
+    env.extras["log"]["Metrics/spine_hind_contact_fraction"] = (
+      exclusive_hind.float().mean()
+    )
+    env.extras["log"]["Metrics/spine_front_contact_fraction"] = (
+      exclusive_front.float().mean()
+    )
+    env.extras["log"]["Metrics/spine_contact_phase_reward"] = reward.mean()
+    return reward
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.last_touchdown[env_ids] = -1.0
+    self.pair_seen[env_ids] = False
+    self.pair_completion_time[env_ids] = -1.0
+
+
 def extended_flight_posture(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -713,6 +1027,111 @@ def spine_phase_tracking(
   )
   env.extras["log"]["Metrics/spine_phase_error"] = torch.abs(spine_pos - target).mean()
   return reward * active.float()
+
+
+class spine_leg_coordination:
+  """Reward normalized, oscillatory spine-leg coordination.
+
+  A running mean removes constant front/rear velocity bias, while the normalized
+  correlation prevents larger joint velocities from increasing this reward.
+  """
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    del cfg
+    shape = (env.num_envs,)
+    self.leg_mean = torch.zeros(shape, device=env.device)
+    self.leg_variance = torch.zeros(shape, device=env.device)
+    self.spine_variance = torch.zeros(shape, device=env.device)
+    self.cross_correlation = torch.zeros(shape, device=env.device)
+
+  def __call__(
+    self,
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    spine_cfg: SceneEntityCfg,
+    leg_cfg: SceneEntityCfg,
+    coordination_sign: float = -1.0,
+    negative_limit: float = 0.60,
+    positive_limit: float = 0.30,
+    filter_time_constant: float = 0.25,
+    amplitude_boost: float = 0.5,
+    excess_penalty: float = 8.0,
+    speed_threshold: float = 1.5,
+    minimum_tracking_ratio: float = 0.5,
+    minimum_leg_rms: float = 0.25,
+    minimum_spine_rms: float = 0.10,
+  ) -> torch.Tensor:
+    asset: Entity = env.scene[spine_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    leg_velocity = asset.data.joint_vel[:, leg_cfg.joint_ids]
+    if leg_velocity.shape[1] != 4:
+      raise ValueError(
+        "spine_leg_coordination requires four ordered hip-pitch joints, "
+        f"got {leg_velocity.shape[1]}."
+      )
+
+    effective_leg_velocity = 0.5 * (
+      leg_velocity[:, 2:].mean(dim=1) - leg_velocity[:, :2].mean(dim=1)
+    )
+    spine_position = asset.data.joint_pos[:, spine_cfg.joint_ids].squeeze(1)
+    spine_velocity = asset.data.joint_vel[:, spine_cfg.joint_ids].squeeze(1)
+
+    alpha = 1.0 - math.exp(-env.step_dt / filter_time_constant)
+    self.leg_mean.lerp_(effective_leg_velocity, alpha)
+    centered_leg_velocity = effective_leg_velocity - self.leg_mean
+    self.leg_variance.lerp_(torch.square(centered_leg_velocity), alpha)
+    self.spine_variance.lerp_(torch.square(spine_velocity), alpha)
+    signed_product = coordination_sign * spine_velocity * centered_leg_velocity
+    self.cross_correlation.lerp_(signed_product, alpha)
+
+    leg_rms = torch.sqrt(self.leg_variance + 1.0e-6)
+    spine_rms = torch.sqrt(self.spine_variance + 1.0e-6)
+    phase_score = torch.clamp(
+      self.cross_correlation / (leg_rms * spine_rms), min=-1.0, max=1.0
+    )
+    moving = (leg_rms >= minimum_leg_rms) & (spine_rms >= minimum_spine_rms)
+
+    expected_sign = torch.where(
+      centered_leg_velocity >= 0.0,
+      torch.full_like(centered_leg_velocity, coordination_sign),
+      torch.full_like(centered_leg_velocity, -coordination_sign),
+    )
+    signed_amplitude = expected_sign * spine_position
+    expected_limit = torch.where(
+      expected_sign < 0.0,
+      torch.full_like(signed_amplitude, negative_limit),
+      torch.full_like(signed_amplitude, positive_limit),
+    )
+    useful_amplitude = torch.minimum(
+      torch.clamp(signed_amplitude, min=0.0), expected_limit
+    )
+    excess = torch.clamp(signed_amplitude - expected_limit, min=0.0)
+    reward = phase_score * (1.0 + amplitude_boost * useful_amplitude)
+    reward -= excess_penalty * torch.square(excess)
+
+    target_speed = torch.clamp(command[:, 0], min=1.0e-6)
+    tracking_ratio = asset.data.root_link_lin_vel_b[:, 0] / target_speed
+    tracking_gate = torch.clamp(
+      (tracking_ratio - minimum_tracking_ratio) / (1.0 - minimum_tracking_ratio),
+      min=0.0,
+      max=1.0,
+    )
+    active = (command[:, 0] > speed_threshold) & moving
+    env.extras["log"]["Metrics/spine_position"] = spine_position.mean()
+    env.extras["log"]["Metrics/spine_velocity_abs"] = spine_velocity.abs().mean()
+    env.extras["log"]["Metrics/spine_leg_phase_score"] = phase_score.mean()
+    env.extras["log"]["Metrics/spine_tracking_gate"] = tracking_gate.mean()
+    env.extras["log"]["Metrics/effective_leg_velocity_abs"] = (
+      centered_leg_velocity.abs().mean()
+    )
+    return reward * tracking_gate * active.float()
+
+  def reset(self, env_ids: torch.Tensor) -> None:
+    self.leg_mean[env_ids] = 0.0
+    self.leg_variance[env_ids] = 0.0
+    self.spine_variance[env_ids] = 0.0
+    self.cross_correlation[env_ids] = 0.0
 
 
 class spine_flexion:
