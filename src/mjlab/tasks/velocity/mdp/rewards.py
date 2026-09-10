@@ -15,6 +15,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse
 from mjlab.utils.lab_api.string import (
   resolve_matching_names_values,
 )
+from .reference_motion import ReferenceMotion
 
 if TYPE_CHECKING:
   from mjlab.envs import ManagerBasedRlEnv
@@ -22,6 +23,73 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+
+
+class ReferenceSpineTracking:
+  """Track the reference spine flexion signal by a robot joint."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.reference = None
+    self.period = 1.0
+    self.asset_cfg = None
+
+  def __call__(self, env: ManagerBasedRlEnv, motion_file: str,
+               period: float, asset_cfg: SceneEntityCfg, **kwargs) -> torch.Tensor:
+    if self.reference is None:
+      self.reference = ReferenceMotion(motion_file, env.device)
+      self.period = float(period)
+      self.asset_cfg = asset_cfg
+    phase = env.episode_length_buf * env.step_dt / self.period
+    target = self.reference.sample(phase, "spine_flexion")
+    actual = env.scene[self.asset_cfg.name].data.joint_pos[:, self.asset_cfg.joint_ids].squeeze(-1)
+
+    env.extras.setdefault("log", {})
+
+    env.extras["log"]["Metrics/body_pitch_joint_mean"] = actual.mean()
+    env.extras["log"]["Metrics/reference_spine_target"] = target.mean()
+    env.extras["log"]["Metrics/reference_spine_error"] = (
+      torch.abs(actual - target).mean()
+    )
+
+    return torch.exp(-10.0 * torch.square(actual - target))
+
+
+class ReferenceBodyTracking:
+  """Track relative front/rear body displacement from the reference motion."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.reference = ReferenceMotion(cfg.params["motion_file"], env.device)
+    self.period = float(cfg.params.get("period", 1.0))
+
+  def __call__(self, env: ManagerBasedRlEnv) -> torch.Tensor:
+    phase = env.episode_length_buf * env.step_dt / self.period
+    target_x = self.reference.sample(phase, "relative_chest_x")
+    target_y = self.reference.sample(phase, "relative_chest_y")
+    robot = env.scene["robot"]
+    delta = robot.data.body_pos_w[:, 0] - robot.data.body_pos_w[:, 1]
+    error = torch.square(delta[:, 0] - target_x) + torch.square(delta[:, 2] - target_y)
+    return torch.exp(-5.0 * error)
+
+
+class ReferenceFeetTracking:
+  """Track sagittal foot positions from a reference gait cycle."""
+
+  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+    self.reference = ReferenceMotion(cfg.params["motion_file"], env.device)
+    self.period = float(cfg.params.get("period", 0.223))
+    self.asset_cfg = cfg.params["asset_cfg"]
+
+  def __call__(self, env: ManagerBasedRlEnv, **kwargs) -> torch.Tensor:
+    phase = env.episode_length_buf * env.step_dt / self.period
+    names = ("FL", "FR", "RL", "RR")
+    target = self.reference.sample_many(
+      phase, tuple(f"{foot}_{axis}" for foot in names for axis in ("x", "y"))
+    ).reshape(env.num_envs, 4, 2)
+    asset = env.scene[self.asset_cfg.name]
+    positions = asset.data.site_pos_w[:, self.asset_cfg.site_ids]
+    root = asset.data.root_link_pos_w.unsqueeze(1)
+    actual = torch.stack((positions[..., 0] - root[..., 0], positions[..., 2] - root[..., 2]), dim=-1)
+    return torch.exp(-10.0 * torch.mean(torch.square(actual - target), dim=(1, 2)))
 
 
 def track_linear_velocity(
@@ -624,6 +692,55 @@ def excess_foot_contacts(
   penalty = normalized_excess * active.float()
   env.extras["log"]["Metrics/excess_foot_contacts"] = penalty.mean()
   return penalty
+
+
+def foot_contact_duration_penalty(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  command_name: str,
+  max_contact_time: float = 0.07,
+  actual_speed_threshold: float = 1.0,
+) -> torch.Tensor:
+  """Penalize feet that remain in contact longer than the stance target."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  command = env.command_manager.get_command(command_name)
+  assert sensor.data.current_contact_time is not None
+  assert command is not None
+
+  contact_time = sensor.data.current_contact_time
+  excess = torch.clamp(contact_time - max_contact_time, min=0.0)
+  forward_speed = env.scene["robot"].data.root_link_lin_vel_b[:, 0]
+  active = (command[:, 0] > 0.0) & (forward_speed > actual_speed_threshold)
+  # Sensor channels: FL, FR, RL, RR. RR/FR receive a slightly stronger penalty.
+  weights = torch.tensor([1.0, 1.5, 1.0, 1.5], device=env.device)
+  penalty = (excess * weights).mean(dim=1) * active.float()
+  return penalty
+
+
+class EventContactTiming:
+  """Reward the rotary touchdown order using measured contact events."""
+
+  def __init__(self, cfg, env: ManagerBasedRlEnv):
+    del cfg
+    self.last_contact = torch.zeros((env.num_envs, 4), dtype=torch.bool, device=env.device)
+    self.next_state = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+
+  def __call__(self, env: ManagerBasedRlEnv, sensor_name: str,
+               expected_sequence=(0, 3, 1, 2)) -> torch.Tensor:
+    sensor: ContactSensor = env.scene[sensor_name]
+    contact = sensor.data.current_contact_time > 0.0
+    touchdown = contact & ~self.last_contact
+    previous_state = self.next_state.clone()
+    reward = torch.zeros(env.num_envs, device=env.device)
+    for state, foot_id in enumerate(expected_sequence):
+      hit = (previous_state == state) & touchdown[:, foot_id]
+      reward += hit.float()
+      self.next_state = torch.where(hit, (state + 1) % 4, self.next_state)
+    # A fresh FL touchdown starts a new rotary cycle.
+    self.next_state = torch.where(touchdown[:, expected_sequence[0]], 1, self.next_state)
+    self.last_contact = contact
+    reward -= torch.clamp(contact.float().sum(dim=1) - 1.0, min=0.0)
+    return reward
 
 
 def sustained_flight(

@@ -37,10 +37,10 @@ DEFAULT_GAIT_PERIOD = 0.6
 # Changing it abruptly changes the meaning of two policy inputs (sin/cos phase).
 FLIGHT_FINETUNE_PERIOD = DEFAULT_GAIT_PERIOD
 FLIGHT_FINETUNE_STANCES = (
-  (0.12, 0.25),  # FL
-  (0.58, 0.71),  # FR
-  (0.71, 0.84),  # RL
-  (0.25, 0.40),  # RR
+  (0.00, 0.14),  # FL
+  (0.40, 0.54),  # FR
+  (0.54, 0.68),  # RL
+  (0.14, 0.28),  # RR
 )
 FLIGHT_FINETUNE_WINDOWS = ((0.0, 0.12), (0.40, 0.58), (0.84, 1.0))
 
@@ -435,10 +435,10 @@ def cheetah_flat_flight_finetune_env_cfg(
     cfg.rewards["termination_penalty"].weight = -200.0
     # Stage 1 (0-1499 iterations): learn stable straight locomotion while the
     # command curriculum raises speed from 1 to 2 m/s.
-    cfg.rewards["planar_drift_l2"].weight = -4.0
+    cfg.rewards["planar_drift_l2"].weight = -6.0
     cfg.rewards["world_straight_line_l2"] = RewardTermCfg(
       func=mdp.world_straight_line_l2,
-      weight=-0.5,
+      weight=-2.0,
       params={"lateral_position_scale": 2.0, "heading_scale": 3.0},
     )
     cfg.rewards["hip_roll_deviation_l2"] = RewardTermCfg(
@@ -626,36 +626,110 @@ def cheetah_flat_duration_finetune_env_cfg(
 ) -> ManagerBasedRlEnvCfg:
   """Fine-tune model 3999 for event-synchronized feline flight postures."""
   cfg = cheetah_flat_flight_finetune_env_cfg(play=play)
+
+
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
-  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+  # Match the 4 m/s baseline during fine-tuning; evaluation can still use 5 m/s.
+  twist_cmd.ranges.lin_vel_x = (5.0, 5.0) if play else (4.0, 4.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
   cfg.curriculum.pop("command_vel", None)
 
+  
+
   if play:
     return cfg
+
+  # Use the measured touchdown sequence rather than an open-loop clock.  The
+  # encoder keeps the same two inputs while making rewards follow real contacts.
+  for group in cfg.observations.values():
+    group.terms["gait_phase"] = ObservationTermCfg(
+      func=mdp.contact_gait_phase,
+      params={"sensor_name": "feet_ground_contact", "sequence": (0, 3, 1, 2)},
+    )
 
   # Remove the from-scratch curriculum. These starting values match the stage
   # immediately before iteration 4000, from which model_3999.pt was obtained.
   for name in tuple(cfg.curriculum):
     if name.startswith("reward_"):
       cfg.curriculum.pop(name)
-  cfg.rewards["excess_foot_contacts"].weight = -2.0
+  # Discourage prolonged multi-foot support so the sequential contacts form
+  # distinct stance intervals instead of a slow bounding gait.
+  cfg.rewards["excess_foot_contacts"].weight = 0.0
+  cfg.rewards["foot_contact_duration"] = RewardTermCfg(
+    func=mdp.foot_contact_duration_penalty,
+    weight=-2.0,
+    params={
+      "sensor_name": "feet_ground_contact",
+      "command_name": "twist",
+      # Encourage shorter, distinct stance intervals for RR and FR.
+      "max_contact_time": 0.06,
+      "actual_speed_threshold": 1.0,
+    },
+  )
   cfg.rewards["early_gait_cycle"].weight = 0.0
   # Disable rewards tied to the incompatible 0.6 s clock. Contact order is
   # retained by the event-based sequence reward below.
-  cfg.rewards["feline_gallop_contacts"].weight = 0.0
-  cfg.rewards["flight_phase"].weight = 0.0
+  cfg.rewards["feline_gallop_contacts"].weight = 0.5 # was 0.0 # Возвращаем reward правильных интервалов опоры.
+  # Stage 1 flight shaping: introduce the aerial posture gradually so the
+  # stable 4 m/s policy is not replaced by a standing/falling solution.
+  cfg.rewards["flight_phase"].weight = 0.5
+  cfg.rewards["flight_phase"].params["min_air_time"] = 0.05
   cfg.rewards["flight_contact_violation"].weight = 0.0
-  cfg.rewards["sustained_flight"].weight = 0.0
-  cfg.rewards["extended_flight_posture"].weight = 0.0
+  cfg.rewards["sustained_flight"].weight = 0.8
+  cfg.rewards.pop("foot_contact_duration", None)
+  cfg.rewards["event_contact_timing"] = RewardTermCfg(
+    func=mdp.EventContactTiming,
+    weight=1.0,
+    params={
+      "sensor_name": "feet_ground_contact",
+      "expected_sequence": (0, 3, 1, 2),
+    },
+  )
+  # Restore a mild incentive for the extended aerial posture without
+  # disturbing the stable contact sequence.
+  cfg.rewards["extended_flight_posture"].weight = 0.3
   cfg.rewards["collected_flight_posture"].weight = 0.0
   cfg.rewards["spine_phase_tracking"].weight = 0.0
   cfg.rewards["hind_propulsion"].weight = 0.0
   cfg.rewards["gallop_sequence"].weight = 5.0
-  cfg.rewards["track_linear_velocity"].weight = 7.0
+  cfg.rewards["track_linear_velocity"].weight = 7.5
   cfg.rewards["track_linear_velocity"].params["std"] = 2.0
+  cfg.rewards["forward_velocity_progress"] = RewardTermCfg(
+    func=mdp.forward_velocity_progress,
+    weight=1.5,
+    params={"command_name": "twist"},
+  )
+  # Imitate the measured pelvis-to-chest flexion around MuJoCo's Y axis.
+  cfg.rewards["reference_spine"] = RewardTermCfg(
+    func=mdp.ReferenceSpineTracking,
+    weight=0.0, #was 0.05
+    params={
+      "motion_file": "data/cheetah_full_reference.npz",
+      "period": 1.0,
+      "asset_cfg": SceneEntityCfg(
+        "robot", joint_names=("body_pitch_joint",)
+      ),
+    },
+  )
+  cfg.rewards["reference_feet"] = RewardTermCfg(
+    func=mdp.ReferenceFeetTracking,
+    weight=0.0, #was 0.05
+    params={
+      "motion_file": "data/cheetah_full_reference.npz",
+      "period": 0.223,
+      "asset_cfg": SceneEntityCfg(
+        "robot", site_names=("FL", "FR", "RL", "RR"), preserve_order=True
+      ),
+    },
+  )
+  # Preserve the stable baseline while the new flight terms are learned.
+  cfg.rewards["termination_penalty"].weight = -200.0
+  cfg.rewards["planar_drift_l2"].weight = -6.0
+  cfg.rewards["world_straight_line_l2"].weight = -2.0
+  cfg.rewards["track_angular_velocity"].weight = 3.0
+  cfg.rewards["upright"].weight = 2.0
   feet_cfg = SceneEntityCfg(
     "robot",
     site_names=("FL", "FR", "RL", "RR"),
@@ -664,7 +738,7 @@ def cheetah_flat_duration_finetune_env_cfg(
   spine_cfg = SceneEntityCfg("robot", joint_names=("body_pitch_joint",))
   cfg.rewards["event_collected_flight"] = RewardTermCfg(
     func=mdp.event_flight_posture,
-    weight=1.0,
+    weight=0.50,
     params={
       "sensor_name": "feet_ground_contact",
       "command_name": "twist",
@@ -679,7 +753,7 @@ def cheetah_flat_duration_finetune_env_cfg(
   )
   cfg.rewards["event_extended_flight"] = RewardTermCfg(
     func=mdp.event_flight_posture,
-    weight=2.5,
+    weight=0.75,
     params={
       "sensor_name": "feet_ground_contact",
       "command_name": "twist",
@@ -692,9 +766,10 @@ def cheetah_flat_duration_finetune_env_cfg(
       "metric_prefix": "event_extended_flight",
     },
   )
+  cfg.rewards["sustained_flight"].params["target_duration"] = 0.05
   cfg.rewards["post_rl_flight"] = RewardTermCfg(
     func=mdp.post_touchdown_flight,
-    weight=2.0,
+      weight=0.50,
     params={
       "sensor_name": "feet_ground_contact",
       "command_name": "twist",

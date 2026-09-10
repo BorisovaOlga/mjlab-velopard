@@ -12,6 +12,8 @@ def cheetah_ppo_runner_cfg():
   cfg = unitree_go1_ppo_runner_cfg()
   try:
     cfg.experiment_name = "cheetah_velocity"
+    # Fine-tuning from the stable 4 m/s baseline must be conservative.
+    cfg.algorithm.learning_rate = 1.0e-4
   except Exception:
     pass
   return cfg

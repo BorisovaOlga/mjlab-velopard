@@ -131,6 +131,45 @@ class MjlabOnPolicyRunner(OnPolicyRunner):
     if "log_std" in actor_sd:
       actor_sd["distribution.log_std_param"] = actor_sd.pop("log_std")
 
+    # Allow fine-tuning when the new task appends observation features.  The
+    # Go2 baseline has 51 actor observations while the flexible-spine task has
+    # 53.  Preserve the learned weights and initialize the two new input
+    # columns (and normalizer statistics) to neutral values.
+    expanded_observations = False
+
+    def _pad_appended_observations(state_dict: dict, module) -> None:
+      nonlocal expanded_observations
+      current = module.state_dict()
+      for key, old_value in list(state_dict.items()):
+        new_value = current.get(key)
+        if new_value is None or old_value.shape == new_value.shape:
+          continue
+        if old_value.ndim == new_value.ndim and all(
+          old_value.shape[i] == new_value.shape[i]
+          for i in range(old_value.ndim - 1)
+        ) and old_value.shape[-1] < new_value.shape[-1]:
+          padded = torch.zeros_like(new_value)
+          padded[..., : old_value.shape[-1]] = old_value
+          # Normalizer variance/std should be one for unseen features.
+          if key.endswith("_var") or key.endswith("_std"):
+            padded[..., old_value.shape[-1] :] = 1.0
+          state_dict[key] = padded
+          expanded_observations = True
+          print(
+            f"Expanded {key}: {tuple(old_value.shape)} -> {tuple(new_value.shape)}"
+          )
+
+    _pad_appended_observations(actor_sd, self.alg._raw_actor)
+    critic_sd = loaded_dict.get("critic_state_dict", {})
+    _pad_appended_observations(critic_sd, self.alg._raw_critic)
+
+    # Adam moments in the old checkpoint still have the original 51-wide
+    # tensors.  Let PPO create fresh optimizer state for the expanded model.
+    if expanded_observations:
+      # rsl-rl expects this key to exist; provide the freshly initialized
+      # optimizer state instead of incompatible 51-wide Adam moments.
+      loaded_dict["optimizer_state_dict"] = self.alg.optimizer.state_dict()
+
     load_iteration = self.alg.load(loaded_dict, load_cfg, strict)
     if load_iteration:
       self.current_learning_iteration = loaded_dict["iter"]
