@@ -210,6 +210,7 @@ def main(
   frame_end: int | None = None,
   ik_iterations: int = 30,
   project_lateral: bool = True,
+  rigid_spine: bool = False,
 ) -> None:
   """Convert one BVH dog clip to Cheetah generalized-coordinate CSV.
 
@@ -250,10 +251,11 @@ def main(
     qpos[:3] = root_pos
     qpos[3:7] = (_COORD_ROT * root_rot).as_quat(scalar_first=True)
     target_root_rot = _COORD_ROT * root_rot
+    spine_target = 0.0
+    if not rigid_spine:
+      spine_target = _spine_angle(positions, source_root, root_rot)
     qpos[joint_qpos["body_pitch_joint"]] = _clip_joint(
-      model,
-      "body_pitch_joint",
-      _spine_angle(positions, source_root, root_rot),
+      model, "body_pitch_joint", spine_target
     )
     data.qpos[:] = qpos
     mujoco.mj_forward(model, data)

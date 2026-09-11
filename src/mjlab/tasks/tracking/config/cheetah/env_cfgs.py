@@ -40,8 +40,11 @@ _TRACKED_BODIES = (
   "right_knee_pitch_link",
 )
 
-_DEFAULT_MOTION_FILE = Path(
-  "docs/reborn_spined_cheetah_train/dog_mocap_bvh/cheetah_motion.npz"
+_FLEX_MOTION_FILE = Path(
+  "docs/reborn_spined_cheetah_train/dog_mocap_bvh/D1_010_KAN01_002_flex.npz"
+)
+_RIGID_MOTION_FILE = Path(
+  "docs/reborn_spined_cheetah_train/dog_mocap_bvh/D1_010_KAN01_002_rigid.npz"
 )
 
 _SPINE_JOINTS = ("body_pitch_joint",)
@@ -50,13 +53,16 @@ _LEG_JOINTS = tuple(name for name in _CHEETAH_JOINTS if name not in _SPINE_JOINT
 
 def reborn_cheetah_flat_tracking_env_cfg(
   play: bool = False,
+  *,
+  rigid_spine: bool = False,
+  motion_file: str | Path | None = None,
 ) -> ManagerBasedRlEnvCfg:
-  """Create a flat-ground imitation environment for the flexible Cheetah."""
+  """Create a flat-ground imitation environment for the Cheetah."""
   cfg = make_tracking_env_cfg()
   cfg.sim.nconmax = None
   cfg.sim.njmax = 300
   cfg.scene.entities = {
-    "robot": get_reborn_cheetah_robot_cfg(),
+    "robot": get_reborn_cheetah_robot_cfg(rigid_spine=rigid_spine),
   }
 
   action = ReferenceJointPositionActionCfg(
@@ -78,15 +84,22 @@ def reborn_cheetah_flat_tracking_env_cfg(
     r".*knee_pitch_joint": (-1.00, 0.50),
     # The BVH retarget contains extension up to roughly +0.7 rad.  Tracking
     # must not clip that target before the policy can learn it.
-    r"body_pitch_joint": (-0.90, 0.90),
+    r"body_pitch_joint": (0.0, 0.0) if rigid_spine else (-0.90, 0.90),
   }
+  if rigid_spine:
+    action.scale[r"body_pitch_joint"] = 0.0
 
   motion = cfg.commands["motion"]
   assert isinstance(motion, MotionCommandCfg)
   motion.anchor_body_name = "body_front_link"
   motion.body_names = _TRACKED_BODIES
+  selected_motion_file = (
+    Path(motion_file)
+    if motion_file is not None
+    else (_RIGID_MOTION_FILE if rigid_spine else _FLEX_MOTION_FILE)
+  )
   motion.motion_file = (
-    str(_DEFAULT_MOTION_FILE) if _DEFAULT_MOTION_FILE.exists() else ""
+    str(selected_motion_file) if selected_motion_file.exists() else ""
   )
   motion.sampling_mode = "uniform"
   motion.pose_range = {}

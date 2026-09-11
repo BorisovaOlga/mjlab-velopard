@@ -40,6 +40,7 @@ def main(
   output_fps: float = 50.0,
   device: str = "cpu",
   line_range: tuple[int, int] | None = None,
+  rigid_spine: bool = False,
 ) -> None:
   """Convert Cheetah CSV to the NPZ contract used by the imitation task."""
   if device.startswith("cuda") and not torch.cuda.is_available():
@@ -61,7 +62,10 @@ def main(
 
   sim_cfg = SimulationCfg()
   sim_cfg.mujoco.timestep = 1.0 / output_fps
-  scene = Scene(reborn_cheetah_flat_tracking_env_cfg().scene, device=device)
+  scene = Scene(
+    reborn_cheetah_flat_tracking_env_cfg(rigid_spine=rigid_spine).scene,
+    device=device,
+  )
   model = scene.compile()
   sim = Simulation(num_envs=1, cfg=sim_cfg, model=model, device=device)
   scene.initialize(sim.mj_model, sim.model, sim.data)
