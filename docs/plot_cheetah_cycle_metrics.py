@@ -287,6 +287,14 @@ def main() -> None:
     raise ValueError("cycles >= 1, warmup-cycles >= 0 and bins >= 4 are required.")
   args.output_dir.mkdir(parents=True, exist_ok=True)
   data = collect_rollout(args)
+  np.savez(
+    args.output_dir / "rollout_data.npz",
+    time=np.linspace(0.0, data["measurement_duration"], len(data["phase"])),
+    phase=data["phase"], torque=data["torque"], velocity=data["velocity"],
+    power=data["power"], joint_names=np.asarray(data["joint_names"], dtype=str),
+    total_energy=data["energy"], total_distance=data["distance"],
+    measurement_duration=data["measurement_duration"],
+  )
   print_cot_summary(data)
   plot_cost_and_power(data, args.bins, args.output_dir)
   plot_joint_quantity(
