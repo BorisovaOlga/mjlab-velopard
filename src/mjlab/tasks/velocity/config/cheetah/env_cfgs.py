@@ -308,6 +308,18 @@ def cheetah_rough_env_cfg(
       ],
     },
   )
+  #     params={
+  #     "command_name": "twist",
+  #     "velocity_stages": [
+  #       {"step": 0, "lin_vel_x": (1.0, 1.5)},
+  #       {"step": 500 * 24, "lin_vel_x": (1.0, 2.5)},
+  #       {"step": 1500 * 24, "lin_vel_x": (1.0, 3.5)},
+  #       {"step": 3000 * 24, "lin_vel_x": (1.0, 5.0)},
+  #     ],
+  #   },
+  # )
+
+
   configure_collision_rewards(
     cfg,
     self_collision_sensor=self_collision_cfg.name,
@@ -398,7 +410,7 @@ def cheetah_flat_env_cfg(
   )
   cfg.rewards["termination_penalty"] = RewardTermCfg(
     func=envs_mdp.is_terminated,
-    weight=-50.0,
+    weight=-200.0, # was -50
   )
 
   # Disable terrain curriculum (not present in play mode since rough clears all).
@@ -435,7 +447,7 @@ def cheetah_flat_flight_finetune_env_cfg(
     cfg.rewards["termination_penalty"].weight = -200.0
     # Stage 1 (0-1499 iterations): learn stable straight locomotion while the
     # command curriculum raises speed from 1 to 2 m/s.
-    cfg.rewards["planar_drift_l2"].weight = -6.0
+    cfg.rewards["planar_drift_l2"].weight = -8.0 #was-6.0
     cfg.rewards["world_straight_line_l2"] = RewardTermCfg(
       func=mdp.world_straight_line_l2,
       weight=-2.0,
@@ -631,7 +643,7 @@ def cheetah_flat_duration_finetune_env_cfg(
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   # Match the 4 m/s baseline during fine-tuning; evaluation can still use 5 m/s.
-  twist_cmd.ranges.lin_vel_x = (5.0, 5.0) #if play else (4.0, 4.0)
+  twist_cmd.ranges.lin_vel_x = (1.0, 3.0) #if play else (4.0, 4.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
   cfg.curriculum.pop("command_vel", None)

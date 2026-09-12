@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     help="Environment task used by the checkpoint",
   )
   parser.add_argument("--cycles", type=int, default=20)
+  parser.add_argument("--duration", type=float, default=10.0,
+                      help="Measurement duration in seconds")
   parser.add_argument("--warmup-cycles", type=int, default=5)
   parser.add_argument("--bins", type=int, default=20)
   parser.add_argument(
@@ -253,8 +255,9 @@ def collect_rollout(
   warmup_steps = args.warmup_cycles * steps_per_cycle
   # Extra nominal cycles give touchdown alignment enough complete edge-to-edge
   # intervals even when the learned cadence differs from the training clock.
-  collection_steps = (args.cycles + 5) * steps_per_cycle
+  collection_steps = round(args.duration / env.unwrapped.step_dt)
   phases: list[float] = []
+  times: list[float] = []
   torques: list[np.ndarray] = []
   velocities: list[np.ndarray] = []
   powers: list[np.ndarray] = []
@@ -262,6 +265,8 @@ def collect_rollout(
   contacts: list[np.ndarray] = []
   forward_speeds: list[float] = []
   lateral_speeds: list[float] = []
+  total_energy = 0.0
+  total_distance = 0.0
 
   obs = env.get_observations()
   try:
@@ -276,12 +281,16 @@ def collect_rollout(
       velocity = robot.data.joint_vel[0]
       joint_power = torch.abs(torque * velocity)
       speed = torch.clamp(torch.abs(robot.data.root_link_lin_vel_b[0, 0]), min=0.25)
+      dt = env.unwrapped.step_dt
+      total_energy += float(joint_power.sum().cpu()) * dt
+      total_distance += abs(float(robot.data.root_link_lin_vel_b[0, 0].cpu())) * dt
       original_phase = (
         env.episode_length_buf[0] * env.unwrapped.step_dt / args.gait_period
       ) % 1.0
       shifted_phase = (original_phase - PHASE_ORIGIN) % 1.0
 
       phases.append(float(shifted_phase.cpu()))
+      times.append((step - warmup_steps) * env.unwrapped.step_dt)
       torques.append(torque.detach().cpu().numpy().copy())
       velocities.append(velocity.detach().cpu().numpy().copy())
       powers.append(joint_power.detach().cpu().numpy().copy())
@@ -297,6 +306,7 @@ def collect_rollout(
 
   data: dict[str, np.ndarray | tuple[str, ...]] = {
     "phase": np.asarray(phases),
+    "time": np.asarray(times),
     "torque": np.asarray(torques),
     "velocity": np.asarray(velocities),
     "power": np.asarray(powers),
@@ -305,6 +315,9 @@ def collect_rollout(
     "forward_speed": np.asarray(forward_speeds),
     "lateral_speed": np.asarray(lateral_speeds),
     "joint_names": joint_names,
+    "total_energy": total_energy,
+    "total_distance": total_distance,
+    "measurement_duration": args.duration,
   }
   if args.phase_source == "contact":
     return align_to_fl_touchdowns(
@@ -514,6 +527,25 @@ def main() -> None:
     )
   args.output_dir.mkdir(parents=True, exist_ok=True)
   data = collect_rollout(args)
+  np.savez(
+    args.output_dir / "rollout_data.npz",
+    phase=data["phase"], torque=data["torque"], velocity=data["velocity"],
+    time=data["time"],
+    power=data["power"], contact=data["contact"],
+    forward_speed=data["forward_speed"], lateral_speed=data["lateral_speed"],
+    joint_names=np.asarray(data["joint_names"], dtype=str),
+    total_energy=data.get("total_energy", np.nan),
+    total_distance=data.get("total_distance", np.nan),
+    measurement_duration=args.duration,
+  )
+  energy = data["total_energy"]
+  distance = data["total_distance"]
+  cot_scalar = energy / (MASS * GRAVITY * max(distance, 1e-9))
+  print(f"Measurement duration: {args.duration:.3f} s")
+  print(f"Mechanical energy: {energy:.6f} J")
+  print(f"Distance: {distance:.6f} m")
+  print(f"Mean speed: {distance / args.duration:.6f} m/s")
+  print(f"Mechanical Cost of Transport: {cot_scalar:.6f}")
   print_cot_summary(data)
   plot_cost_and_power(data, args.bins, args.output_dir)
   plot_joint_quantity(
