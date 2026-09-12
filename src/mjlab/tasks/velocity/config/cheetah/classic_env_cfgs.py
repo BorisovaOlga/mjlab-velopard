@@ -2,6 +2,7 @@
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
@@ -28,7 +29,7 @@ def cheetah_classic_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   twist_cmd.rel_forward_envs = 0.0
   twist_cmd.rel_world_envs = 1.0
   twist_cmd.heading_command = False
-  twist_cmd.ranges.lin_vel_x = (5.0, 5.0)
+  twist_cmd.ranges.lin_vel_x = (5.0, 5.0) if play else (1.0, 1.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
   twist_cmd.ranges.heading = None
@@ -84,9 +85,21 @@ def cheetah_classic_flat_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     },
   )
 
-  # No velocity curriculum: every training and play environment receives the
-  # same 5 m/s command, so CoT is evaluated under the same target condition.
-  cfg.curriculum.pop("command_vel", None)
+  if play:
+    # Evaluation always uses the final target speed.
+    cfg.curriculum.pop("command_vel", None)
+  else:
+    # Gradually increase speed during training to avoid collapse at startup.
+    cfg.curriculum["command_vel"] = CurriculumTermCfg(
+      func=mdp.commands_vel,
+      params={"command_name": "twist", "velocity_stages": []},
+    )
+    cfg.curriculum["command_vel"].params["velocity_stages"] = [
+      {"step": 0, "lin_vel_x": (1.0, 1.0), "lin_vel_y": (0.0, 0.0), "ang_vel_z": (0.0, 0.0)},
+      {"step": 1000 * 24, "lin_vel_x": (2.5, 2.5)},
+      {"step": 2000 * 24, "lin_vel_x": (4.0, 4.0)},
+      {"step": 3000 * 24, "lin_vel_x": (5.0, 5.0)},
+    ]
 
   # Keep the posture reward scoped explicitly to the twelve leg joints.
   cfg.rewards["pose"].params["asset_cfg"] = SceneEntityCfg(

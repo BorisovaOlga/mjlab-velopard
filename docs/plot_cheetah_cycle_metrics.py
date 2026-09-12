@@ -32,7 +32,11 @@ STAGES = (
 def parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("checkpoint", type=Path, help="Path to model_*.pt")
+  parser.add_argument("--task-id", default=TASK_ID,
+                      help="Task used to construct the evaluation environment")
   parser.add_argument("--cycles", type=int, default=20)
+  parser.add_argument("--duration", type=float, default=10.0,
+                      help="Measurement duration in seconds")
   parser.add_argument("--warmup-cycles", type=int, default=5)
   parser.add_argument("--bins", type=int, default=20)
   parser.add_argument("--device", default=None)
@@ -90,14 +94,14 @@ def collect_rollout(
   if not checkpoint.is_file():
     raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
 
-  env_cfg = load_env_cfg(TASK_ID, play=True)
+  env_cfg = load_env_cfg(args.task_id, play=True)
   env_cfg.scene.num_envs = 1
   env_cfg.terminations = {}
-  agent_cfg = load_rl_cfg(TASK_ID)
+  agent_cfg = load_rl_cfg(args.task_id)
   base_env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
   env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
 
-  runner_cls = load_runner_cls(TASK_ID) or MjlabOnPolicyRunner
+  runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
   runner = runner_cls(env, asdict(agent_cfg), device=device)
   runner.load(
     str(checkpoint), load_cfg={"actor": True}, strict=True, map_location=device
@@ -108,12 +112,14 @@ def collect_rollout(
 
   steps_per_cycle = round(GAIT_PERIOD / env.unwrapped.step_dt)
   warmup_steps = args.warmup_cycles * steps_per_cycle
-  collection_steps = args.cycles * steps_per_cycle
+  collection_steps = round(args.duration / env.unwrapped.step_dt)
   phases: list[float] = []
   torques: list[np.ndarray] = []
   velocities: list[np.ndarray] = []
   powers: list[np.ndarray] = []
   cot: list[float] = []
+  energy = 0.0
+  distance = 0.0
 
   obs = env.get_observations()
   try:
@@ -127,7 +133,11 @@ def collect_rollout(
       torque = robot.data.qfrc_actuator[0]
       velocity = robot.data.joint_vel[0]
       joint_power = torch.abs(torque * velocity)
-      speed = torch.clamp(torch.abs(robot.data.root_link_lin_vel_b[0, 0]), min=0.25)
+      dt = env.unwrapped.step_dt
+      power = float(joint_power.sum().cpu())
+      speed = float(torch.abs(robot.data.root_link_lin_vel_w[0, 0]).cpu())
+      energy += power * dt
+      distance += speed * dt
       original_phase = (
         env.episode_length_buf[0] * env.unwrapped.step_dt / GAIT_PERIOD
       ) % 1.0
@@ -137,7 +147,7 @@ def collect_rollout(
       torques.append(torque.detach().cpu().numpy().copy())
       velocities.append(velocity.detach().cpu().numpy().copy())
       powers.append(joint_power.detach().cpu().numpy().copy())
-      cot.append(float((joint_power.sum() / (MASS * GRAVITY * speed)).cpu()))
+      cot.append(power / (MASS * GRAVITY * max(speed, 1e-6)))
   finally:
     env.close()
 
@@ -147,6 +157,9 @@ def collect_rollout(
     "velocity": np.asarray(velocities),
     "power": np.asarray(powers),
     "cot": np.asarray(cot),
+    "energy": energy,
+    "distance": distance,
+    "measurement_duration": args.duration,
     "joint_names": joint_names,
   }
 
@@ -174,7 +187,16 @@ def plot_cost_and_power(data: dict, bins: int, output_dir: Path) -> None:
 
 
 def print_cot_summary(data: dict) -> None:
-  """Print the rollout mean CoT and the mean for each gait stage."""
+  """Print scalar energy-based CoT and stage diagnostics."""
+  energy = float(data["energy"])
+  distance = float(data["distance"])
+  cot_scalar = energy / (MASS * GRAVITY * max(distance, 1e-9))
+  print(f"Measurement duration: {data['measurement_duration']:.3f} s")
+  print(f"Mechanical energy: {energy:.6f} J")
+  print(f"Distance: {distance:.6f} m")
+  print(f"Mean speed: {distance / data['measurement_duration']:.6f} m/s")
+  print(f"Mechanical Cost of Transport: {cot_scalar:.6f}")
+  # The following values are phase diagnostics, not the scalar CoT.
   phase = data["phase"]
   cot = data["cot"]
   print(f"Mean mechanical Cost of Transport: {np.mean(cot):.4f}")
