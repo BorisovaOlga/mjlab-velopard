@@ -1,6 +1,7 @@
 """RL configuration for Cheetah velocity task."""
 
 from mjlab.tasks.velocity.config.go1.rl_cfg import unitree_go1_ppo_runner_cfg
+from mjlab.rl import RslRlOnPolicyRunnerCfg
 
 
 def cheetah_ppo_runner_cfg():
