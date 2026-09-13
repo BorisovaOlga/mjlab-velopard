@@ -643,7 +643,7 @@ def cheetah_flat_duration_finetune_env_cfg(
   twist_cmd = cfg.commands["twist"]
   assert isinstance(twist_cmd, UniformVelocityCommandCfg)
   # Match the 4 m/s baseline during fine-tuning; evaluation can still use 5 m/s.
-  twist_cmd.ranges.lin_vel_x = (1.0, 3.0) #if play else (4.0, 4.0)
+  twist_cmd.ranges.lin_vel_x = (2.0, 2.0) if play else (4.0, 4.0)
   twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
   twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
   cfg.curriculum.pop("command_vel", None)
