@@ -16,6 +16,8 @@ from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 
+from actuator_models import efficiency
+
 TASK_ID = "Mjlab-Velocity-Flat-Cheetah"
 GAIT_PERIOD = 0.4
 MASS = 5.424414725317205
@@ -109,14 +111,23 @@ def collect_rollout(
   policy = runner.get_inference_policy(device=device)
   robot = env.unwrapped.scene["robot"]
   joint_names = robot.joint_names
+  actuator_types = np.array([
+    "AK40-10" if "knee_pitch" in name else "AK45-10"
+    for name in joint_names
+  ])
 
   steps_per_cycle = round(GAIT_PERIOD / env.unwrapped.step_dt)
   warmup_steps = args.warmup_cycles * steps_per_cycle
   collection_steps = round(args.duration / env.unwrapped.step_dt)
   phases: list[float] = []
   torques: list[np.ndarray] = []
+  positions: list[np.ndarray] = []
   velocities: list[np.ndarray] = []
   powers: list[np.ndarray] = []
+  mechanical_powers: list[np.ndarray] = []
+  energy_trace: list[float] = []
+  com_positions: list[np.ndarray] = []
+  com_velocities: list[np.ndarray] = []
   cot: list[float] = []
   energy = 0.0
   distance = 0.0
@@ -132,11 +143,19 @@ def collect_rollout(
 
       torque = robot.data.qfrc_actuator[0]
       velocity = robot.data.joint_vel[0]
-      joint_power = torch.abs(torque * velocity)
+      mech_power = torch.abs(torque * velocity)
+      eta = torch.as_tensor(
+        [efficiency(float(torch.abs(torque[i]).cpu()), actuator_types[i])
+         for i in range(len(joint_names))],
+        device=torque.device,
+        dtype=torque.dtype,
+      )
+      joint_power = mech_power / eta
       dt = env.unwrapped.step_dt
       power = float(joint_power.sum().cpu())
       speed = float(torch.abs(robot.data.root_link_lin_vel_w[0, 0]).cpu())
       energy += power * dt
+      energy_trace.append(energy)
       distance += speed * dt
       original_phase = (
         env.episode_length_buf[0] * env.unwrapped.step_dt / GAIT_PERIOD
@@ -145,8 +164,12 @@ def collect_rollout(
 
       phases.append(float(shifted_phase.cpu()))
       torques.append(torque.detach().cpu().numpy().copy())
+      positions.append(robot.data.joint_pos[0].detach().cpu().numpy().copy())
       velocities.append(velocity.detach().cpu().numpy().copy())
+      mechanical_powers.append(mech_power.detach().cpu().numpy().copy())
       powers.append(joint_power.detach().cpu().numpy().copy())
+      com_positions.append(robot.data.root_com_pose_w[0, :3].detach().cpu().numpy().copy())
+      com_velocities.append(robot.data.root_com_vel_w[0, :3].detach().cpu().numpy().copy())
       cot.append(power / (MASS * GRAVITY * max(speed, 1e-6)))
   finally:
     env.close()
@@ -154,8 +177,13 @@ def collect_rollout(
   return {
     "phase": np.asarray(phases),
     "torque": np.asarray(torques),
+    "position": np.asarray(positions),
     "velocity": np.asarray(velocities),
     "power": np.asarray(powers),
+    "mechanical_power": np.asarray(mechanical_powers),
+    "energy_trace": np.asarray(energy_trace),
+    "com_position": np.asarray(com_positions),
+    "com_velocity": np.asarray(com_velocities),
     "cot": np.asarray(cot),
     "energy": energy,
     "distance": distance,
@@ -290,8 +318,10 @@ def main() -> None:
   np.savez(
     args.output_dir / "rollout_data.npz",
     time=np.linspace(0.0, data["measurement_duration"], len(data["phase"])),
-    phase=data["phase"], torque=data["torque"], velocity=data["velocity"],
+    phase=data["phase"], position=data["position"], torque=data["torque"], velocity=data["velocity"],
     power=data["power"], joint_names=np.asarray(data["joint_names"], dtype=str),
+    mechanical_power=data["mechanical_power"], energy_trace=data["energy_trace"],
+    com_position=data["com_position"], com_velocity=data["com_velocity"],
     total_energy=data["energy"], total_distance=data["distance"],
     measurement_duration=data["measurement_duration"],
   )
