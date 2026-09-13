@@ -697,7 +697,7 @@ def cheetah_flat_duration_finetune_env_cfg(
   # Imitate the measured pelvis-to-chest flexion around MuJoCo's Y axis.
   cfg.rewards["reference_spine"] = RewardTermCfg(
     func=mdp.ReferenceSpineTracking,
-    weight=0.0, #was 0.05
+    weight=0.5,
     params={
       "motion_file": "data/cheetah_full_reference.npz",
       "period": 1.0,
@@ -708,10 +708,10 @@ def cheetah_flat_duration_finetune_env_cfg(
   )
   cfg.rewards["reference_feet"] = RewardTermCfg(
     func=mdp.ReferenceFeetTracking,
-    weight=0.0, #was 0.05
+    weight=1.0,
     params={
       "motion_file": "data/cheetah_full_reference.npz",
-      "period": 0.223,
+      "period": 1.0,
       "asset_cfg": SceneEntityCfg(
         "robot", site_names=("FL", "FR", "RL", "RR"), preserve_order=True
       ),
