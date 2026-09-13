@@ -8,10 +8,19 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added the classic HTML report generator from the fixed-spine Cheetah branch.
+- Added Cheetah rollout export to NPZ and interactive HTML report generation
+  scripts from the feat/cheetah branch.
 - Added clock-free active- and rigid-spine Reborn Cheetah velocity tasks with
   torque-speed-limited actuators, performance-driven command curriculum, and
   matched spine ablation metrics.
 - Added an active-spine Reborn Cheetah ablation without a dedicated spine reward.
+
+Fixed
+^^^^^
+
+- Fixed Cheetah report collection for tracking tasks without a foot contact
+  sensor by adding the sensor to the report environment.
 
 Changed
 ^^^^^^^
