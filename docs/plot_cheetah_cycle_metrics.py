@@ -261,6 +261,11 @@ def collect_rollout(
   torques: list[np.ndarray] = []
   velocities: list[np.ndarray] = []
   powers: list[np.ndarray] = []
+  positions: list[np.ndarray] = []
+  com_positions: list[np.ndarray] = []
+  com_velocities: list[np.ndarray] = []
+  mechanical_powers: list[np.ndarray] = []
+  energy_trace: list[float] = []
   cot: list[float] = []
   contacts: list[np.ndarray] = []
   forward_speeds: list[float] = []
@@ -294,6 +299,11 @@ def collect_rollout(
       torques.append(torque.detach().cpu().numpy().copy())
       velocities.append(velocity.detach().cpu().numpy().copy())
       powers.append(joint_power.detach().cpu().numpy().copy())
+      positions.append(robot.data.joint_pos[0].detach().cpu().numpy().copy())
+      mechanical_powers.append((torque * velocity).detach().cpu().numpy().copy())
+      com_positions.append(robot.data.root_link_pos_w[0].detach().cpu().numpy().copy())
+      com_velocities.append(robot.data.root_link_lin_vel_w[0].detach().cpu().numpy().copy())
+      energy_trace.append(total_energy)
       cot.append(float((joint_power.sum() / (MASS * GRAVITY * speed)).cpu()))
       assert feet_contact_sensor.data.found is not None
       contacts.append(
@@ -310,6 +320,11 @@ def collect_rollout(
     "torque": np.asarray(torques),
     "velocity": np.asarray(velocities),
     "power": np.asarray(powers),
+    "position": np.asarray(positions),
+    "mechanical_power": np.asarray(mechanical_powers),
+    "com_position": np.asarray(com_positions),
+    "com_velocity": np.asarray(com_velocities),
+    "energy_trace": np.asarray(energy_trace),
     "cot": np.asarray(cot),
     "contact": np.asarray(contacts),
     "forward_speed": np.asarray(forward_speeds),
@@ -531,7 +546,9 @@ def main() -> None:
     args.output_dir / "rollout_data.npz",
     phase=data["phase"], torque=data["torque"], velocity=data["velocity"],
     time=data["time"],
-    power=data["power"], contact=data["contact"],
+    power=data["power"], mechanical_power=data["mechanical_power"],
+    position=data["position"], energy_trace=data["energy_trace"],
+    com_position=data["com_position"], com_velocity=data["com_velocity"], contact=data["contact"],
     forward_speed=data["forward_speed"], lateral_speed=data["lateral_speed"],
     joint_names=np.asarray(data["joint_names"], dtype=str),
     total_energy=data.get("total_energy", np.nan),
