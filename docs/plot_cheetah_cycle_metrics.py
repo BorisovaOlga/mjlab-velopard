@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import mediapy as media
 import numpy as np
 import torch
 
@@ -60,6 +62,15 @@ def parse_args() -> argparse.Namespace:
     help="Gait-cycle period in seconds (must match the training config)",
   )
   parser.add_argument("--device", default=None)
+  parser.add_argument("--video-width", type=int, default=1920)
+  parser.add_argument("--video-height", type=int, default=1080)
+  parser.add_argument("--camera-azimuth", type=float, default=None)
+  parser.add_argument("--camera-elevation", type=float, default=None)
+  parser.add_argument(
+    "--video",
+    action="store_true",
+    help="Save rollout.mp4 with one frame per measurement sample (clock only)",
+  )
   parser.add_argument(
     "--output-dir",
     type=Path,
@@ -259,7 +270,16 @@ def collect_rollout(
       ),
     )
   agent_cfg = load_rl_cfg(args.task_id)
-  base_env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+  if args.video:
+    env_cfg.viewer.width = args.video_width
+    env_cfg.viewer.height = args.video_height
+    if args.camera_azimuth is not None:
+      env_cfg.viewer.azimuth = args.camera_azimuth
+    if args.camera_elevation is not None:
+      env_cfg.viewer.elevation = args.camera_elevation
+  base_env = ManagerBasedRlEnv(
+    cfg=env_cfg, device=device, render_mode="rgb_array" if args.video else None
+  )
   env = RslRlVecEnvWrapper(base_env, clip_actions=agent_cfg.clip_actions)
 
   runner_cls = load_runner_cls(args.task_id) or MjlabOnPolicyRunner
@@ -298,15 +318,34 @@ def collect_rollout(
   lateral_speeds: list[float] = []
   total_energy = 0.0
   total_distance = 0.0
+  video_stack = ExitStack()
 
   obs = env.get_observations()
   try:
+    writer = (
+      video_stack.enter_context(
+        media.VideoWriter(
+          args.output_dir / "rollout.mp4",
+          shape=(args.video_height, args.video_width),
+          fps=1.0 / base_env.step_dt,
+          crf=16,
+          ffmpeg_args=("-preset", "slow", "-movflags", "+faststart"),
+        )
+      )
+      if args.video
+      else None
+    )
     for step in range(warmup_steps + collection_steps):
       with torch.no_grad():
         actions = policy(obs)
       obs, _, _, _ = env.step(actions)
       if step < warmup_steps:
         continue
+      if args.video:
+        frame = base_env.render()
+        assert frame is not None
+        assert writer is not None
+        writer.add_image(frame)
 
       torque = robot.data.qfrc_actuator[0]
       velocity = robot.data.joint_vel[0]
@@ -340,6 +379,7 @@ def collect_rollout(
       forward_speeds.append(float(robot.data.root_link_lin_vel_b[0, 0].cpu()))
       lateral_speeds.append(float(robot.data.root_link_lin_vel_b[0, 1].cpu()))
   finally:
+    video_stack.close()
     env.close()
 
   data: dict[str, np.ndarray | tuple[str, ...]] = {
@@ -562,6 +602,14 @@ def plot_body_velocity(data: dict, bins: int, output_dir: Path) -> None:
 
 def main() -> None:
   args = parse_args()
+  if args.video and any(
+    size <= 0 or size % 2 for size in (args.video_width, args.video_height)
+  ):
+    raise ValueError("Video width and height must be positive even numbers.")
+  if args.video and args.phase_source != "clock":
+    raise ValueError("Use --phase-source clock to synchronize video and samples.")
+  if args.duration <= 0:
+    raise ValueError("duration must be positive")
   if (
     args.cycles < 1 or args.warmup_cycles < 0 or args.bins < 4 or args.gait_period <= 0
   ):
@@ -589,6 +637,8 @@ def main() -> None:
     total_energy=data.get("total_energy", np.nan),
     total_distance=data.get("total_distance", np.nan),
     measurement_duration=args.duration,
+    training_path=str(args.checkpoint.parent),
+    checkpoint=str(args.checkpoint),
   )
   energy = data["total_energy"]
   distance = data["total_distance"]

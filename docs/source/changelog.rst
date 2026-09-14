@@ -8,6 +8,14 @@ Upcoming version (not yet released)
 Added
 ^^^^^
 
+- Added camera angle options for report videos and a side-view flex Cheetah
+  stride sequence with synchronized frames.
+- Added a flexible-spine report generator based on the rigid report, with
+  active spine metadata and the same synchronized plots and video.
+- Added configurable report video resolution with Full HD defaults and
+  high-quality streaming H.264 encoding.
+- Added synchronized rollout video recording and bidirectional video/time-slider
+  synchronization in the rigid Cheetah HTML report.
 - Added the classic HTML report generator from the fixed-spine Cheetah branch.
 - Added Cheetah rollout export to NPZ and interactive HTML report generation
   scripts from the feat/cheetah branch.
@@ -25,6 +33,24 @@ Fixed
 Changed
 ^^^^^^^
 
+- Plotted joint torque versus angular velocity in phase portraits, with a
+  synchronized point highlighting the selected time sample.
+- Rendered the report Phase portraits tab with point markers.
+- Centered the report Energy plot at 80% of its panel width and resized plots
+  when switching tabs.
+- Included all actuator specifications directly in each joint row of the rigid
+  report metadata table.
+- Added user-provided AK40-10 and AK45-10 specifications to the rigid report
+  actuator comparison table.
+- Applied Montserrat Medium to rigid report text outside the plots.
+- Displayed the training run path below rigid report characteristics and saved
+  checkpoint provenance in new rollout exports.
+- Presented rigid Cheetah report characteristics as rounded square metric cards
+  with separate labels and values.
+- Synchronized time cursors on rigid Cheetah report plots with the report
+  slider and video playback.
+- Darkened the rigid Cheetah report background and added thin card borders
+  matching the plot borders.
 - Revised the Reborn Cheetah reward-driven pipeline with frontier-gated command
   stages, touchdown debouncing, frequency-invariant pair scoring, normalized
   spine-leg coordination, contact-conditioned spine phases, explicit footfall

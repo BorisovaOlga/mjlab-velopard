@@ -1,0 +1,28 @@
+{
+  "start_s": 3.16,
+  "end_s": 3.62,
+  "duration_s": 0.45999999999999996,
+  "frame_indices": [
+    158,
+    161,
+    164,
+    167,
+    170,
+    172,
+    175,
+    178
+  ],
+  "frame_times_s": [
+    3.16,
+    3.22,
+    3.2800000000000002,
+    3.34,
+    3.4,
+    3.44,
+    3.5,
+    3.56
+  ],
+  "camera_azimuth_deg": 90,
+  "camera_elevation_deg": 0,
+  "checkpoint": "logs/rsl_rl/reborn_cheetah_imitation_residual_power/2026-09-08_12-34-59/model_8000.pt"
+}
