@@ -59,7 +59,9 @@
         <geom name="body_pitch_link_collision_1" class="collision" type="cylinder" size="0.032 0.02" pos="-0.065 0.035 0" euler="0 1.57 0" rgba="0 0 0.7 0.5"/>
         <geom name="body_pitch_link_collision_2" class="collision" type="cylinder" size="0.032 0.02" pos="-0.065 -0.035 0" euler="0 1.57 0" rgba="0 0 0.7 0.5"/>
         <geom name="spine_collision" class="collision" type="sphere" size="0.055" pos="0 0 0" rgba="0 0 0.7 0.5"/>
-        <joint name="body_pitch_joint" type="hinge" axis="0 1 0" range="-1 1"  armature="0.00089" frictionloss="0.01" damping="0.1" actuatorfrcrange="-17.0 17.0"/>
+        
+        <joint name="body_pitch_joint" type="hinge" axis="0 1 0" range="-1 1"  armature="0.00089" frictionloss="0.01" damping="1.0" actuatorfrcrange="-17.0 17.0" stiffness="1.0" springref="0.0"  />
+
         <body name="left_hip_roll_link" pos="-0.08700000000000002 0.03600000000000017 -9.956824444577827e-63" quat="1.0 0.0 0.0 0.0">
           <inertial pos="-0.027997983370715348 0.004246170320840001 1.5960226731981128e-09" mass="0.05164362292808013" quat="0.7063740702082538 -0.7063743488668459 0.032178763180447205 -0.03217886574354496" diaginertia="2.582657600053341e-05 3.455590394722235e-05 4.296506602336842e-05"/>
           <geom type="mesh" mesh="left_hip_roll_link" group="0" contype="0" conaffinity="0" rgba="0.8 0.8 0.9 1"/>

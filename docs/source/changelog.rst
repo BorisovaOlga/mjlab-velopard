@@ -33,6 +33,8 @@ Fixed
 Changed
 ^^^^^^^
 
+- Configured the Cheetah spine joint with passive stiffness of 3 N m/rad,
+  damping of 1 N m s/rad, and a zero spring reference angle.
 - Plotted joint torque versus angular velocity in phase portraits, with a
   synchronized point highlighting the selected time sample.
 - Rendered the report Phase portraits tab with point markers.
